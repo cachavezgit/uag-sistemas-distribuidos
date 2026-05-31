@@ -1,0 +1,12 @@
+[package]
+name = "p2p_chat_server_client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "servidor"
+path = "src/servidor.rs"
+
+[[bin]]
+name = "cliente"
+path = "src/cliente.rs"

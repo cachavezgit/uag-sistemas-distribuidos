@@ -39,3 +39,8 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb

@@ -86,6 +86,43 @@ cargo run -- 3
 
 Escribe un mensaje y presiona Enter para enviarlo a los otros nodos. Escribe `salir` para terminar.
 
+#### `parte2` — Topología Estrella con Servidor Central (`U2 A1 - Comunicacion cliente-servidor/parte2/`)
+
+Variante donde un **servidor central** gestiona el registro de peers y hace broadcast de cada mensaje hacia todos los demás nodos conectados.
+
+**Binarios:**
+
+| Binario | Archivo | Descripción |
+|---|---|---|
+| `servidor` | `src/servidor.rs` | Servidor central en `127.0.0.1:9000`. Mantiene la lista de peers registrados y reenvía cada mensaje a todos excepto al remitente. |
+| `cliente` | `src/cliente.rs` | Peer que abre su propio puerto TCP de escucha, se registra en el servidor central y envía/recibe mensajes a través de él. |
+
+**Protocolo:**
+1. El cliente se conecta al servidor y envía `REGISTRO:<puerto_propio>`.
+2. Para enviar un mensaje, escribe en la conexión al servidor.
+3. El servidor hace broadcast a todos los peers registrados (conectándose a su puerto de escucha).
+4. Si se cae la conexión, el cliente reconecta automáticamente.
+
+**Cómo ejecutar:**
+
+```bash
+cd "U2 A1 - Comunicacion cliente-servidor/parte2"
+
+# Terminal 1 — Servidor central (iniciar primero)
+cargo run --bin servidor
+
+# Terminal 2 — Peer en puerto 8001
+cargo run --bin cliente -- 8001
+
+# Terminal 3 — Peer en puerto 8002
+cargo run --bin cliente -- 8002
+
+# Terminal 4 — Peer en puerto 8003
+cargo run --bin cliente -- 8003
+```
+
+Escribe un mensaje y presiona Enter para difundirlo. Escribe `salir` para terminar.
+
 ---
 
 ## Requisitos

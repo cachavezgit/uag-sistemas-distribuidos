@@ -1,1 +1,0 @@
-/Users/cachavezmcpro21/uag-projects/uag-sistemas-distribuidos/U2\ A1\ -\ Comunicacion\ cliente-servidor/parte1/target/debug/p2p_chat: /Users/cachavezmcpro21/uag-projects/uag-sistemas-distribuidos/U2\ A1\ -\ Comunicacion\ cliente-servidor/parte1/src/main.rs
