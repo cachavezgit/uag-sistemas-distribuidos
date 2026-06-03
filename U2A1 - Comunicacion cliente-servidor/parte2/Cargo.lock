@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "p2p_chat"
+name = "p2p_chat_server_client"
 version = "0.1.0"
