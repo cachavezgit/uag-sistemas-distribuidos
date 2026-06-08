@@ -3,22 +3,25 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-// IP y puerto donde escucha el servidor central
-const SERVIDOR_IP: &str = "127.0.0.1";
-const SERVIDOR_PUERTO: u16 = 9000;
-
 // Base de datos en memoria: lista de (ip, puerto) de clientes registrados
 type ListaNodos = Arc<Mutex<Vec<(String, u16)>>>;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let ip = args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1");
+    let puerto: u16 = args
+        .get(2)
+        .map(|p| p.parse().expect("Puerto inválido"))
+        .unwrap_or(9000);
+
     let nodos: ListaNodos = Arc::new(Mutex::new(Vec::new()));
 
-    let addr = format!("{}:{}", SERVIDOR_IP, SERVIDOR_PUERTO);
+    let addr = format!("{}:{}", ip, puerto);
     let listener = TcpListener::bind(&addr).expect("No se pudo iniciar el servidor");
 
     println!("╔══════════════════════════════════════════╗");
     println!("║     Servidor Central — Topología Estrella ║");
-    println!("║     Escuchando en {}:{}          ║", SERVIDOR_IP, SERVIDOR_PUERTO);
+    println!("║     Escuchando en {}:{}          ║", ip, puerto);
     println!("╚══════════════════════════════════════════╝\n");
 
     // Loop infinito: acepta conexiones de clientes
