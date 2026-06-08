@@ -10,13 +10,13 @@ const SERVIDOR_PUERTO: u16 = 9000;
 fn main() {
     // El puerto de escucha propio se pasa como argumento
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Uso: {} <puerto_escucha>  (ej: 8001, 8002, 8003...)", args[0]);
+    if args.len() < 3 {
+        eprintln!("Uso: {} <mi_puerto> <mi_ip>  (ej: 8001 192.168.1.10)", args[0]);
         std::process::exit(1);
     }
 
     let mi_puerto: u16 = args[1].parse().expect("Puerto inválido");
-    let mi_ip = "127.0.0.1";
+    let mi_ip = args[2].clone();
     let nombre = format!("Cliente:{}", mi_puerto);
 
     let mensajes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
