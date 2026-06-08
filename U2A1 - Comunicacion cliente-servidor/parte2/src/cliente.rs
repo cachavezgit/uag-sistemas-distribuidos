@@ -3,27 +3,25 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-// Dirección del servidor central
-const SERVIDOR_IP: &str = "127.0.0.1";
 const SERVIDOR_PUERTO: u16 = 9000;
 
 fn main() {
-    // El puerto de escucha propio se pasa como argumento
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Uso: {} <mi_puerto> <mi_ip>  (ej: 8001 192.168.1.10)", args[0]);
+    if args.len() < 4 {
+        eprintln!("Uso: {} <mi_puerto> <mi_ip> <servidor_ip>  (ej: 8001 192.168.1.10 192.168.1.5)", args[0]);
         std::process::exit(1);
     }
 
     let mi_puerto: u16 = args[1].parse().expect("Puerto inválido");
     let mi_ip = args[2].clone();
+    let servidor_ip = args[3].clone();
     let nombre = format!("Cliente:{}", mi_puerto);
 
     let mensajes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     println!("╔══════════════════════════════════════════╗");
     println!("║  Chat P2P via Servidor Central            ║");
-    println!("║  {}  →  Servidor {}:{}    ║", nombre, SERVIDOR_IP, SERVIDOR_PUERTO);
+    println!("║  {}  →  Servidor {}:{}    ║", nombre, servidor_ip, SERVIDOR_PUERTO);
     println!("╚══════════════════════════════════════════╝");
     println!("Escribe tu mensaje y presiona Enter.");
     println!("Escribe 'salir' para terminar.\n");
@@ -58,7 +56,7 @@ fn main() {
     // ──────────────────────────────────────────
     // REGISTRARSE en el servidor central
     // ──────────────────────────────────────────
-    let mut conexion_servidor = conectar_servidor()
+    let mut conexion_servidor = conectar_servidor(&servidor_ip)
         .expect("No se pudo conectar al servidor central. ¿Está corriendo?");
 
     // Enviar paquete de registro con nuestro puerto
@@ -101,7 +99,7 @@ fn main() {
         if let Err(_) = writeln!(conexion_servidor, "{}", paquete) {
             // Reconectar si se perdió la conexión
             println!("[!] Reconectando al servidor...");
-            match conectar_servidor() {
+            match conectar_servidor(&servidor_ip) {
                 Ok(nueva) => {
                     conexion_servidor = nueva;
                     writeln!(conexion_servidor, "REGISTRO:{}", mi_puerto).ok();
@@ -121,6 +119,6 @@ fn main() {
     }
 }
 
-fn conectar_servidor() -> std::io::Result<TcpStream> {
-    TcpStream::connect(format!("{}:{}", SERVIDOR_IP, SERVIDOR_PUERTO))
+fn conectar_servidor(ip: &str) -> std::io::Result<TcpStream> {
+    TcpStream::connect(format!("{}:{}", ip, SERVIDOR_PUERTO))
 }
