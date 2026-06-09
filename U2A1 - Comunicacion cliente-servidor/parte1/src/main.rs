@@ -5,7 +5,6 @@ use std::thread;
 
 // ─────────────────────────────────────────────
 // Configuración de los 3 nodos predefinidos
-// Cada nodo conoce a los otros dos.
 // ─────────────────────────────────────────────
 const NODOS: [(&str, u16); 3] = [
     ("127.0.0.1", 8001),
@@ -14,7 +13,6 @@ const NODOS: [(&str, u16); 3] = [
 ];
 
 fn main() {
-    // El número de nodo (1, 2 o 3) se pasa como argumento
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Uso: {} <numero_nodo>  (1, 2 o 3)", args[0]);
@@ -30,7 +28,6 @@ fn main() {
     let (mi_ip, mi_puerto) = NODOS[nodo_idx];
     let nombre = format!("Nodo {}", nodo_idx + 1);
 
-    // Buffer de mensajes compartido entre hilos (para mostrarlo en pantalla)
     let mensajes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mensajes_servidor = Arc::clone(&mensajes);
 
@@ -38,12 +35,12 @@ fn main() {
     println!("║      Chat P2P con Hilos — {}         ║", nombre);
     println!("║  Escuchando en {}:{}             ║", mi_ip, mi_puerto);
     println!("╚══════════════════════════════════════════╝");
-    println!("Escribe tu mensaje y presiona Enter para enviarlo.");
-    println!("Escribe 'salir' para terminar.\n");
+    println!("Formato: @<nodo> <mensaje>   → envío directo  (ej: @2 hola)");
+    println!("         @all <mensaje>      → envío a todos  (ej: @all hola)");
+    println!("         salir               → terminar\n");
 
     // ──────────────────────────────────────────
-    // HILO DISPLAY — imprime mensajes recibidos
-    // continuamente sin esperar input del usuario
+    // HILO DISPLAY
     // ──────────────────────────────────────────
     let mensajes_display = Arc::clone(&mensajes);
     thread::spawn(move || {
@@ -67,7 +64,6 @@ fn main() {
             match stream {
                 Ok(stream) => {
                     let mensajes_clone = Arc::clone(&mensajes_servidor);
-                    // Un hilo por cada conexión entrante
                     thread::spawn(move || {
                         manejar_conexion(stream, mensajes_clone);
                     });
@@ -94,34 +90,51 @@ fn main() {
             continue;
         }
 
-        // Enviar a todos los otros nodos
-        let paquete = format!("[{}] {}", nombre, texto);
-        let mut enviados = 0;
-        let mut fallidos = 0;
-
-        for (i, (ip, puerto)) in NODOS.iter().enumerate() {
-            if i == nodo_idx {
-                continue; // No me envío a mí mismo
-            }
-            match enviar_mensaje(ip, *puerto, &paquete) {
-                Ok(_) => enviados += 1,
-                Err(e) => {
-                    eprintln!("  ✗ No se pudo enviar a {}:{} — {}", ip, puerto, e);
-                    fallidos += 1;
-                }
-            }
+        // ── Parsear formato: @<destino> <mensaje> ──
+        if !texto.starts_with('@') {
+            println!("  ⚠ Formato inválido. Usa @<nodo> o @all seguido del mensaje.");
+            continue;
         }
 
-        println!(
-            "  ✓ Enviado a {} nodo(s){}",
-            enviados,
-            if fallidos > 0 {
-                format!(", {} no disponible(s)", fallidos)
-            } else {
-                String::new()
-            }
-        );
+        let partes: Vec<&str> = texto[1..].splitn(2, ' ').collect();
+        if partes.len() < 2 {
+            println!("  ⚠ Falta el mensaje. Ejemplo: @2 hola");
+            continue;
+        }
 
+        let destino = partes[0];
+        let mensaje = partes[1];
+        let paquete = format!("[{}] {}", nombre, mensaje);
+
+        if destino.eq_ignore_ascii_case("all") {
+            // Enviar a todos los otros nodos
+            let mut enviados = 0;
+            for (i, (ip, puerto)) in NODOS.iter().enumerate() {
+                if i == nodo_idx { continue; }
+                match enviar_mensaje(ip, *puerto, &paquete) {
+                    Ok(_) => enviados += 1,
+                    Err(_) => eprintln!("  ✗ Nodo {} no disponible", i + 1),
+                }
+            }
+            println!("  ✓ Enviado a {} nodo(s)", enviados);
+        } else {
+            // Envío directo a un nodo específico
+            match destino.parse::<usize>() {
+                Ok(dest_num) if dest_num >= 1 && dest_num <= NODOS.len() => {
+                    let dest_idx = dest_num - 1;
+                    if dest_idx == nodo_idx {
+                        println!("  ⚠ No puedes enviarte un mensaje a ti mismo.");
+                        continue;
+                    }
+                    let (ip, puerto) = NODOS[dest_idx];
+                    match enviar_mensaje(ip, puerto, &paquete) {
+                        Ok(_) => println!("  ✓ Enviado a Nodo {}", dest_num),
+                        Err(_) => eprintln!("  ✗ Nodo {} no disponible", dest_num),
+                    }
+                }
+                _ => println!("  ⚠ Destino inválido. Usa @1, @2, @3 o @all"),
+            }
+        }
     }
 }
 
@@ -138,10 +151,8 @@ fn manejar_conexion(stream: TcpStream, mensajes: Arc<Mutex<Vec<String>>>) {
     for linea in reader.lines() {
         match linea {
             Ok(msg) if !msg.is_empty() => {
-                let entrada = format!("  << {}", msg);
-                // Guardar en el buffer compartido
                 let mut msgs = mensajes.lock().unwrap();
-                msgs.push(entrada);
+                msgs.push(format!("  << {}", msg));
             }
             Ok(_) => {}
             Err(e) => {
