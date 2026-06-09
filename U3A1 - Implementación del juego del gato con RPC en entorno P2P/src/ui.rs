@@ -26,21 +26,33 @@ const COLOR_DIM: Color = Color::DarkGray;
 
 /// Renderiza toda la interfaz en un frame de Ratatui
 pub fn render(frame: &mut Frame, game: &Game) {
-    // ── Layout principal: título / tablero / estado / ayuda ──
+    // ── Layout externo: columna izquierda (juego) / columna derecha (historia) ──
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(60),
+            Constraint::Percentage(40),
+        ])
+        .split(frame.area());
+
+    // ── Columna izquierda: título / tablero / estado / controles ──
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // título
             Constraint::Length(11), // tablero 3x3
             Constraint::Length(3),  // estado
-            Constraint::Length(3),  // ayuda
+            Constraint::Length(3),  // controles
         ])
-        .split(frame.area());
+        .split(columns[0]);
 
     render_title(frame, areas[0], game);
     render_board(frame, areas[1], game);
     render_status(frame, areas[2], game);
-    render_help(frame, areas[3], game);
+    render_help(frame, areas[3]);
+
+    // ── Columna derecha: panel Historia ──
+    render_history_panel(frame, columns[1], game);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -140,7 +152,7 @@ fn render_status(frame: &mut Frame, area: Rect, game: &Game) {
         }
         GameResult::Win(winner) => {
             if *winner == game.my_player {
-                ("¡Ganaste! 🎉 — Presiona R para jugar de nuevo o Q para salir".to_string(), COLOR_WIN)
+                ("¡Ganaste! — Presiona R para jugar de nuevo o Q para salir".to_string(), COLOR_WIN)
             } else {
                 ("Perdiste. El rival ganó — Presiona R para jugar de nuevo o Q para salir".to_string(), COLOR_LOSE)
             }
@@ -160,15 +172,66 @@ fn render_status(frame: &mut Frame, area: Rect, game: &Game) {
 }
 
 // ─────────────────────────────────────────────────────────
-// Panel de ayuda con controles
+// Panel de controles
 // ─────────────────────────────────────────────────────────
-fn render_help(frame: &mut Frame, area: Rect, _game: &Game) {
+fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new("  1-9: elegir casilla   |   R: reiniciar   |   Q: salir")
         .style(Style::default().fg(COLOR_DIM))
         .block(Block::default().borders(Borders::ALL).title(" Controles "))
         .alignment(Alignment::Center);
 
     frame.render_widget(help, area);
+}
+
+// ─────────────────────────────────────────────────────────
+// Panel lateral de historial — siempre visible
+// ─────────────────────────────────────────────────────────
+fn render_history_panel(frame: &mut Frame, area: Rect, game: &Game) {
+    let (my_color, rival_color) = player_colors(game);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if game.move_history.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Sin movidas aún...",
+            Style::default().fg(COLOR_DIM),
+        )));
+    } else {
+        for (i, &(player, cell)) in game.move_history.iter().enumerate() {
+            let symbol = if player == 1 { "X" } else { "O" };
+            let color = if player == 1 {
+                my_color_for(Cell::X, my_color, rival_color)
+            } else {
+                my_color_for(Cell::O, my_color, rival_color)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {:>2}. ", i + 1),
+                    Style::default().fg(COLOR_DIM),
+                ),
+                Span::styled(
+                    format!("J{} ({})", player, symbol),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  →  casilla {}", cell + 1),
+                    Style::default().fg(COLOR_TITLE),
+                ),
+            ]));
+        }
+    }
+
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Historia ")
+                .title_alignment(Alignment::Center),
+        )
+        .alignment(Alignment::Left);
+
+    frame.render_widget(panel, area);
 }
 
 // ─────────────────────────────────────────────────────────

@@ -34,10 +34,11 @@ impl Cell {
 
 /// Estado completo del juego
 pub struct Game {
-    pub board: [Cell; 9],   // Tablero lineal, índices 0-8
-    pub current_player: u8, // 1 = X, 2 = O
-    pub my_player: u8,      // Quién soy yo en esta instancia
+    pub board: [Cell; 9],              // Tablero lineal, índices 0-8
+    pub current_player: u8,            // 1 = X, 2 = O
+    pub my_player: u8,                 // Quién soy yo en esta instancia
     pub result: GameResult,
+    pub move_history: Vec<(u8, usize)>, // (jugador, índice de casilla)
 }
 
 impl Game {
@@ -48,6 +49,7 @@ impl Game {
             current_player: 1, // Siempre empieza el J1
             my_player,
             result: GameResult::Ongoing,
+            move_history: Vec::new(),
         }
     }
 
@@ -70,6 +72,9 @@ impl Game {
         if !self.is_cell_available(index) {
             return false;
         }
+
+        // Registrar movida en el historial
+        self.move_history.push((self.current_player, index));
 
         // Colocar pieza del jugador actual
         self.board[index] = if self.current_player == 1 {
@@ -128,6 +133,7 @@ impl Game {
         self.board = [Cell::Empty; 9];
         self.current_player = 1;
         self.result = GameResult::Ongoing;
+        self.move_history.clear();
     }
 
     /// Retorna el símbolo del jugador local
