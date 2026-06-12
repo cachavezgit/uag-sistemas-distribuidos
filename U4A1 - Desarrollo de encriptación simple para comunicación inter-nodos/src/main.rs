@@ -47,7 +47,12 @@ fn main() {
 
     // ── Lanzar runtime async sólo tras autenticación exitosa ──
     let rt = tokio::runtime::Runtime::new().expect("No se pudo crear el runtime de tokio");
-    if let Err(e) = rt.block_on(iniciar_nodo(my_player, listen_port, rival_addr, usuario)) {
+    let resultado = rt.block_on(iniciar_nodo(my_player, listen_port, rival_addr, usuario.clone()));
+
+    // ── Liberar sesión antes de salir (en cualquier caso) ──
+    auth::cerrar_sesion(&usuario);
+
+    if let Err(e) = resultado {
         eprintln!("[Error] {}", e);
         process::exit(1);
     }
