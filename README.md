@@ -146,7 +146,64 @@ cargo run --bin cliente -- 8003
 
 ---
 
+### U3A1 — Juego del Gato P2P con RPC (Rust)
+
+Implementación del juego del gato (Tic-Tac-Toe) en una arquitectura P2P donde cada nodo actúa simultáneamente como servidor y como cliente usando el framework de RPC **tarpc** sobre TCP.
+
+**Ubicación:** `U3A1 - Implementación del juego del gato con RPC en entorno P2P/`
+
+#### Arquitectura
+
+Cada instancia del nodo levanta dos canales independientes al arrancar:
+
+- **Servidor tarpc** — escucha en su propio puerto y expone el método `make_move(casilla)`. Cuando el rival envía un movimiento, tarpc lo ejecuta en este proceso como si fuera una llamada local.
+- **Cliente tarpc** — se conecta al puerto del rival y llama `make_move(casilla)` de forma remota para notificar los movimientos propios.
+
+Este esquema es equivalente a Java RMI: la interfaz `TicTacToe` define el contrato, `TicTacToeClient` actúa como stub generado automáticamente y `TicTacToeServer` es el skeleton que ejecuta las llamadas entrantes.
+
+#### Módulos
+
+| Archivo | Descripción |
+|---|---|
+| `src/main.rs` | Punto de entrada: parseo de argumentos, inicialización del servidor y cliente RPC, loop principal de eventos. |
+| `src/rpc.rs` | Define el servicio tarpc `TicTacToe` con los métodos `make_move(casilla: usize)` y `ping()`. tarpc genera el trait del servidor y el stub del cliente automáticamente. |
+| `src/network.rs` | Levanta el servidor tarpc en background (`start_server`), crea el cliente con reintentos automáticos (`connect_to_peer`) y envía movimientos remotos (`send_move`). Gestiona el estado compartido entre el servidor RPC y el loop de UI mediante `SharedState`. |
+| `src/game.rs` | Lógica del juego: tablero 3×3, validación de movimientos, detección de ganador/empate y registro del historial de jugadas. |
+| `src/ui.rs` | Interfaz TUI construida con Ratatui: tablero interactivo, panel de estado, controles y panel lateral con el historial de movimientos de la partida. |
+
+#### Cómo ejecutar
+
+```bash
+cd "U3A1 - Implementación del juego del gato con RPC en entorno P2P"
+
+# Terminal 1 — Jugador 1 (escucha en 8001, rival en 8002)
+cargo run -- --jugador 1 --escucha 8001 --rival 127.0.0.1:8002
+
+# Terminal 2 — Jugador 2 (escucha en 8002, rival en 8001)
+cargo run -- --jugador 2 --escucha 8002 --rival 127.0.0.1:8001
+```
+
+Jugador 1 siempre inicia primero y espera 2 segundos para que Jugador 2 levante su servidor antes de intentar conectar.
+
+#### Controles
+
+| Tecla | Acción |
+|---|---|
+| `1` – `9` | Seleccionar casilla del tablero (distribución igual a un teclado numérico) |
+| `R` | Reiniciar partida al terminar |
+| `Q` | Salir del juego |
+
+#### Flujo de un movimiento
+
+1. El jugador local presiona una tecla `1-9`.
+2. El movimiento se aplica al tablero local.
+3. Se invoca `make_move(casilla)` en el peer rival a través de tarpc (RPC real sobre TCP).
+4. El servidor del rival almacena el movimiento en `SharedState`.
+5. El loop de UI del rival lo detecta en el siguiente frame y actualiza su tablero.
+
+---
+
 ## Requisitos
 
 - Python 3.x (sin dependencias externas, solo biblioteca estándar)
-- Rust + Cargo (para la actividad U2 A1)
+- Rust + Cargo (para las actividades U2A1, U3A1 y U4A1)
