@@ -39,15 +39,17 @@ pub struct Game {
     pub my_player: u8,                 // Quién soy yo en esta instancia
     pub result: GameResult,
     pub move_history: Vec<(u8, usize)>, // (jugador, índice de casilla)
+    pub usuario: String,               // Nombre del operador autenticado
 }
 
 impl Game {
     /// Crea un nuevo juego. my_player: 1 si eres J1, 2 si eres J2.
-    pub fn new(my_player: u8) -> Self {
+    pub fn new(my_player: u8, usuario: String) -> Self {
         Game {
             board: [Cell::Empty; 9],
             current_player: 1, // Siempre empieza el J1
             my_player,
+            usuario,
             result: GameResult::Ongoing,
             move_history: Vec::new(),
         }

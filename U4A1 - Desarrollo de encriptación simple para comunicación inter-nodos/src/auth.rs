@@ -25,9 +25,9 @@ struct Usuario {
 }
 
 /// Lee usuario y contraseña por stdin y los valida contra
-/// usuarios.json. Retorna true sólo si existe una entrada
-/// que coincida exactamente con ambos campos.
-pub fn autenticar() -> bool {
+/// usuarios.json. Retorna Some(nombre) si las credenciales
+/// coinciden, o None si la autenticación falla.
+pub fn autenticar() -> Option<String> {
     println!("╔══════════════════════════════════════════╗");
     println!("║    Nodo P2P — Autenticación requerida    ║");
     println!("╚══════════════════════════════════════════╝");
@@ -49,7 +49,7 @@ pub fn autenticar() -> bool {
         Ok(c) => c,
         Err(_) => {
             eprintln!("[Auth] No se encontró el archivo de usuarios: {}", ARCHIVO_USUARIOS);
-            return false;
+            return None;
         }
     };
 
@@ -57,12 +57,13 @@ pub fn autenticar() -> bool {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[Auth] Error al parsear {}: {}", ARCHIVO_USUARIOS, e);
-            return false;
+            return None;
         }
     };
 
-    registro
-        .usuarios
-        .iter()
-        .any(|u| u.usuario == usuario && u.contrasena == contrasena)
+    if registro.usuarios.iter().any(|u| u.usuario == usuario && u.contrasena == contrasena) {
+        Some(usuario.to_string())
+    } else {
+        None
+    }
 }
