@@ -6,6 +6,7 @@
 //   Jugador 2: cargo run -- --escucha 8002 --rival 127.0.0.1:8001
 // ─────────────────────────────────────────────────────────
 
+mod crypto;
 mod game;
 mod network;
 mod rpc;
