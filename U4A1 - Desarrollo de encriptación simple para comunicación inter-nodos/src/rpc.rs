@@ -29,9 +29,10 @@ pub enum MoveResult {
 #[tarpc::service]
 pub trait TicTacToe {
     /// Envía un movimiento al peer remoto.
-    /// casilla: índice 0-8 del tablero
+    /// payload: casilla 0-8 serializada como String y cifrada con Vigenère
+    /// El receptor descifra el payload para obtener el índice original.
     /// Retorna el resultado de aplicar el movimiento.
-    async fn make_move(casilla: usize) -> MoveResult;
+    async fn make_move(payload: String) -> MoveResult;
 
     /// Consulta si el peer remoto está listo para jugar.
     async fn ping() -> bool;
