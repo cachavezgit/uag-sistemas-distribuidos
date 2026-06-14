@@ -18,6 +18,7 @@ use tarpc::{
 };
 use tokio::time::sleep;
 
+use crate::crypto;
 use crate::rpc::{MoveResult, TicTacToe, TicTacToeClient};
 
 // ─────────────────────────────────────────────────────────
@@ -29,13 +30,16 @@ pub struct SharedState {
     pub incoming_move: Arc<Mutex<Option<usize>>>,
     /// Si el rival se desconectó o el juego terminó
     pub rival_disconnected: Arc<Mutex<bool>>,
+    /// Clave Vigenère para descifrar los payloads entrantes
+    pub clave: Arc<String>,
 }
 
 impl SharedState {
-    pub fn new() -> Self {
+    pub fn new(clave: String) -> Self {
         SharedState {
             incoming_move: Arc::new(Mutex::new(None)),
             rival_disconnected: Arc::new(Mutex::new(false)),
+            clave: Arc::new(clave),
         }
     }
 
@@ -61,14 +65,30 @@ pub struct TicTacToeServer {
 }
 
 impl TicTacToe for TicTacToeServer {
-    /// El peer rival invoca este método remotamente para
-    /// notificar su movimiento. Aquí lo almacenamos para
-    /// que el loop de UI lo procese en el siguiente frame.
-    async fn make_move(self, _: context::Context, casilla: usize) -> MoveResult {
+    /// El peer rival invoca este método remotamente para notificar su movimiento.
+    /// Recibe el payload cifrado con Vigenère, lo muestra en terminal para
+    /// evidenciar su opacidad, lo descifra y almacena la casilla resultante.
+    async fn make_move(self, _: context::Context, payload: String) -> MoveResult {
+        // Mostrar el payload tal como viajó por la red (cifrado)
+        println!("[Crypto] Payload recibido (cifrado):   \"{}\"", payload);
+
+        // Descifrar usando la clave compartida almacenada en SharedState
+        let descifrado = crypto::descifrar(&payload, &self.state.clave);
+        println!("[Crypto] Payload descifrado:           \"{}\"", descifrado);
+
+        // Parsear el índice de casilla desde el texto descifrado
+        let casilla = match descifrado.trim().parse::<usize>() {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("[Crypto] Error: payload descifrado no es un número válido");
+                return MoveResult::InvalidCell;
+            }
+        };
+
         if casilla >= 9 {
             return MoveResult::InvalidCell;
         }
-        // Almacenar el movimiento para procesarlo en el loop principal
+
         *self.state.incoming_move.lock().unwrap() = Some(casilla);
         MoveResult::Ok
     }
@@ -142,9 +162,17 @@ pub async fn connect_to_peer(addr: &str) -> anyhow::Result<TicTacToeClient> {
 
 // ─────────────────────────────────────────────────────────
 // Envía un movimiento al peer rival vía RPC
+// Serializa la casilla, la cifra con Vigenère y la envía.
 // ─────────────────────────────────────────────────────────
-pub async fn send_move(client: &TicTacToeClient, casilla: usize) -> bool {
-    match client.make_move(context::current(), casilla).await {
+pub async fn send_move(client: &TicTacToeClient, casilla: usize, clave: &str) -> bool {
+    // Serializar el índice de casilla como texto plano
+    let texto = casilla.to_string();
+
+    // Cifrar con Vigenère antes de entregar al stub RPC
+    let payload = crypto::cifrar(&texto, clave);
+    println!("[Crypto] Enviando casilla {} → payload cifrado: \"{}\"", casilla, payload);
+
+    match client.make_move(context::current(), payload).await {
         Ok(MoveResult::Ok) => true,
         Ok(other) => {
             eprintln!("[RPC] Movimiento rechazado: {:?}", other);
