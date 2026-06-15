@@ -26,7 +26,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use game::{Game, GameResult};
-use network::{connect_to_peer, send_move, start_server, SharedState};
+use network::{connect_to_peer, iniciar_log, send_move, start_server, SharedState};
 use rpc::TicTacToeClient;
 
 const TICK_RATE: Duration = Duration::from_millis(16);
@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
     // ── Parsear argumentos ──
     let args: Vec<String> = std::env::args().collect();
     let (my_player, listen_port, rival_addr, clave) = parse_args(&args);
+
+    // ── Crear crypto.log al arrancar para que `tail -f` funcione de inmediato ──
+    iniciar_log();
 
     // ── Estado compartido entre servidor RPC y UI ──
     // La clave Vigenère se almacena en SharedState para que el servidor

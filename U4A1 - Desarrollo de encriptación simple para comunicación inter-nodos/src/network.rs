@@ -7,6 +7,8 @@
 // el peer remoto ejecuta make_move() como si fuera local.
 // ─────────────────────────────────────────────────────────
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +22,20 @@ use tokio::time::sleep;
 
 use crate::crypto;
 use crate::rpc::{MoveResult, TicTacToe, TicTacToeClient};
+
+// Escribe una línea al archivo crypto.log sin tocar stdout,
+// evitando interferir con la TUI de Ratatui que usa stdout.
+fn log_crypto(msg: &str) {
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("crypto.log") {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
+// Crea crypto.log vacío al arrancar para que `tail -f` funcione
+// desde el inicio sin esperar al primer movimiento.
+pub fn iniciar_log() {
+    let _ = OpenOptions::new().create(true).append(true).open("crypto.log");
+}
 
 // ─────────────────────────────────────────────────────────
 // Estado compartido entre el servidor RPC y el loop de UI
@@ -69,18 +85,18 @@ impl TicTacToe for TicTacToeServer {
     /// Recibe el payload cifrado con Vigenère, lo muestra en terminal para
     /// evidenciar su opacidad, lo descifra y almacena la casilla resultante.
     async fn make_move(self, _: context::Context, payload: String) -> MoveResult {
-        // Mostrar el payload tal como viajó por la red (cifrado)
-        println!("[Crypto] Payload recibido (cifrado):   \"{}\"", payload);
+        // Registrar el payload tal como viajó por la red (cifrado)
+        log_crypto(&format!("[RECV] cifrado:    \"{}\"", payload));
 
         // Descifrar usando la clave compartida almacenada en SharedState
         let descifrado = crypto::descifrar(&payload, &self.state.clave);
-        println!("[Crypto] Payload descifrado:           \"{}\"", descifrado);
+        log_crypto(&format!("[RECV] descifrado: \"{}\"", descifrado));
 
         // Parsear el índice de casilla desde el texto descifrado
         let casilla = match descifrado.trim().parse::<usize>() {
             Ok(c) => c,
             Err(_) => {
-                eprintln!("[Crypto] Error: payload descifrado no es un número válido");
+                log_crypto("[RECV] Error: payload descifrado no es un número válido");
                 return MoveResult::InvalidCell;
             }
         };
@@ -170,7 +186,7 @@ pub async fn send_move(client: &TicTacToeClient, casilla: usize, clave: &str) ->
 
     // Cifrar con Vigenère antes de entregar al stub RPC
     let payload = crypto::cifrar(&texto, clave);
-    println!("[Crypto] Enviando casilla {} → payload cifrado: \"{}\"", casilla, payload);
+    log_crypto(&format!("[SEND] casilla {}  →  cifrado: \"{}\"", casilla, payload));
 
     match client.make_move(context::current(), payload).await {
         Ok(MoveResult::Ok) => true,
