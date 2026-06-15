@@ -2,8 +2,11 @@
 // main.rs — Punto de entrada del juego del gato P2P
 //
 // Uso:
-//   Jugador 1: cargo run -- --escucha 8001 --rival 127.0.0.1:8002
-//   Jugador 2: cargo run -- --escucha 8002 --rival 127.0.0.1:8001
+//   Jugador 1: cargo run -- --jugador 1 --escucha 8001 --rival 127.0.0.1:8002 --clave <clave>
+//   Jugador 2: cargo run -- --jugador 2 --escucha 8002 --rival 127.0.0.1:8001 --clave <clave>
+//
+// Ambos jugadores deben usar la misma --clave para que el cifrado
+// Vigenère sea simétrico y los mensajes puedan descifrarse correctamente.
 // ─────────────────────────────────────────────────────────
 
 mod crypto;
@@ -32,10 +35,12 @@ const TICK_RATE: Duration = Duration::from_millis(16);
 async fn main() -> anyhow::Result<()> {
     // ── Parsear argumentos ──
     let args: Vec<String> = std::env::args().collect();
-    let (my_player, listen_port, rival_addr) = parse_args(&args);
+    let (my_player, listen_port, rival_addr, clave) = parse_args(&args);
 
     // ── Estado compartido entre servidor RPC y UI ──
-    let state = SharedState::new();
+    // La clave Vigenère se almacena en SharedState para que el servidor
+    // RPC pueda descifrar los payloads entrantes del rival.
+    let state = SharedState::new(clave.clone());
 
     // ── Levantar servidor RPC propio ──
     start_server(listen_port, state.clone()).await?;
@@ -62,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     terminal.clear()?;
 
     // ── Loop principal ──
-    let result = run_loop(&mut terminal, &mut game, &state, &rpc_client).await;
+    let result = run_loop(&mut terminal, &mut game, &state, &rpc_client, &clave).await;
 
     // ── Restaurar terminal ──
     disable_raw_mode()?;
@@ -80,6 +85,7 @@ async fn run_loop(
     game: &mut Game,
     state: &SharedState,
     rpc_client: &TicTacToeClient,
+    clave: &str,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
 
@@ -107,7 +113,7 @@ async fn run_loop(
                         KeyCode::Char(c) if c.is_ascii_digit() => {
                             let digit = c as usize - '1' as usize;
                             if digit < 9 {
-                                handle_local_move(game, state, rpc_client, digit).await;
+                                handle_local_move(game, state, rpc_client, digit, clave).await;
                             }
                         }
 
@@ -145,6 +151,7 @@ async fn handle_local_move(
     _state: &SharedState,
     rpc_client: &TicTacToeClient,
     casilla: usize,
+    clave: &str,
 ) {
     if !game.is_my_turn() || game.result != GameResult::Ongoing {
         return;
@@ -156,18 +163,18 @@ async fn handle_local_move(
     // Aplicar localmente
     game.apply_move(casilla);
 
-    // Invocar make_move() en el peer remoto vía RPC
-    // Esta llamada ejecuta código en la otra máquina de forma transparente
-    send_move(rpc_client, casilla).await;
+    // Cifrar y enviar al peer remoto vía RPC
+    send_move(rpc_client, casilla, clave).await;
 }
 
 // ─────────────────────────────────────────────────────────
 // Parsea argumentos de línea de comandos
 // ─────────────────────────────────────────────────────────
-fn parse_args(args: &[String]) -> (u8, u16, String) {
+fn parse_args(args: &[String]) -> (u8, u16, String, String) {
     let mut listen_port: u16 = 8001;
     let mut rival_addr = String::from("127.0.0.1:8002");
     let mut my_player: u8 = 1;
+    let mut clave = String::from("clave_defecto");
 
     let mut i = 1;
     while i < args.len() {
@@ -190,6 +197,12 @@ fn parse_args(args: &[String]) -> (u8, u16, String) {
                     i += 1;
                 }
             }
+            "--clave" => {
+                if let Some(c) = args.get(i + 1) {
+                    clave = c.clone();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -199,7 +212,8 @@ fn parse_args(args: &[String]) -> (u8, u16, String) {
     println!("║   Juego del Gato — P2P con RPC (tarpc)   ║");
     println!("║   Jugador {}  |  Puerto: {}              ║", my_player, listen_port);
     println!("║   Rival en: {}                  ║", rival_addr);
+    println!("║   Cifrado Vigenère activo                ║");
     println!("╚══════════════════════════════════════════╝\n");
 
-    (my_player, listen_port, rival_addr)
+    (my_player, listen_port, rival_addr, clave)
 }
