@@ -203,6 +203,103 @@ Jugador 1 siempre inicia primero y espera 2 segundos para que Jugador 2 levante 
 
 ---
 
+### U4A1 — Juego del Gato P2P con Autenticación y Cifrado Vigenère (Rust)
+
+Extensión de U3A1 que añade dos capas de seguridad sobre la comunicación inter-nodos:
+
+1. **Autenticación** — compuerta síncrona y bloqueante antes de que el nodo abra cualquier socket. El operador debe ingresar credenciales válidas contra `usuarios.json`; si falla, el proceso termina sin exponer ningún puerto.
+2. **Cifrado Vigenère** — cada movimiento se serializa como texto, se cifra con la contraseña del operador como clave y viaja por la red en forma cifrada. El nodo receptor lo descifra antes de aplicarlo al tablero.
+
+**Ubicación:** `U4A1 - Desarrollo de encriptación simple para comunicación inter-nodos/`
+
+#### Arquitectura
+
+```
+main() [síncrona]
+  ├─► parse_args()            ← incluye --clave
+  ├─► iniciar_log()           ← crea crypto.log
+  ├─► auth::autenticar()      ← bloquea aquí; exit(1) si falla
+  ├─► tokio::Runtime::new()   ← solo se crea si auth pasó
+  │     └─► iniciar_nodo()
+  │           ├─► start_server()     ← servidor RPC (descifra entrantes)
+  │           ├─► connect_to_peer()  ← cliente RPC (cifra salientes)
+  │           └─► run_loop()         ← TUI Ratatui
+  └─► auth::cerrar_sesion()   ← siempre se ejecuta al salir
+```
+
+#### Módulos
+
+| Archivo | Descripción |
+|---|---|
+| `src/auth.rs` | Compuerta de autenticación síncrona. Lee `usuarios.json`, valida credenciales por `stdin` y gestiona archivos de lock en `sesiones/` para impedir sesiones duplicadas. |
+| `src/crypto.rs` | Cifrado Vigenère sobre ASCII imprimible (32–126). Expone `cifrar(texto, clave)` y `descifrar(texto, clave)`. Incluye 5 tests unitarios. |
+| `src/main.rs` | Punto de entrada síncrono: autentica, crea el runtime de Tokio y propaga la clave por todo el call stack hasta `send_move`. |
+| `src/rpc.rs` | Define el servicio tarpc. `make_move` cambió su firma de `casilla: usize` a `payload: String` para transportar el texto cifrado. |
+| `src/network.rs` | `send_move` cifra la casilla antes de enviarla. `TicTacToeServer::make_move` descifra el payload al recibirlo. Ambas operaciones se registran en `crypto.log` sin tocar stdout. |
+| `src/game.rs` | Lógica del juego. Incorpora el campo `usuario: String` para mostrar el nombre del operador autenticado en la UI. |
+| `src/ui.rs` | Interfaz TUI con Ratatui. El título muestra `@<usuario>` en verde para identificar la sesión activa. |
+| `usuarios.json` | Registro de credenciales válidas en JSON. |
+
+#### Algoritmo de cifrado
+
+Vigenère sobre el rango ASCII imprimible (códigos 32–126, 95 caracteres):
+
+```
+Cifrado:    c' = ((c - 32) + (k - 32)) % 95 + 32
+Descifrado:  c = ((c' - 32) - (k - 32) + 95) % 95 + 32
+```
+
+La clave es la contraseña que el operador introdujo en la fase de autenticación, reutilizándola sin intercambio de claves adicional. Cada movimiento (casilla 0–8) se serializa a `String`, se cifra y viaja por TCP en su forma cifrada.
+
+#### Cómo ejecutar
+
+```bash
+cd "U4A1 - Desarrollo de encriptación simple para comunicación inter-nodos"
+
+# Terminal 1 — Jugador 1
+cargo run -- --jugador 1 --escucha 8001 --rival 127.0.0.1:8002 --clave misecreta
+
+# Terminal 2 — Jugador 2
+cargo run -- --jugador 2 --escucha 8002 --rival 127.0.0.1:8001 --clave misecreta
+
+# Terminal 3 — Ver payloads cifrados en tiempo real (opcional)
+tail -f crypto.log
+```
+
+Ambos jugadores deben usar la misma `--clave`. Si se omite, el valor por defecto es `clave_defecto`.
+
+#### Controles
+
+| Tecla | Acción |
+|---|---|
+| `1` – `9` | Seleccionar casilla del tablero |
+| `R` | Reiniciar partida al terminar |
+| `Q` | Salir del juego y cerrar sesión |
+
+#### Flujo de un movimiento cifrado
+
+1. El jugador local presiona `5`.
+2. El movimiento se aplica al tablero local.
+3. La casilla (`4`) se serializa a `"4"`, se cifra con Vigenère → p.ej. `"S"`.
+4. Se invoca `make_move("S")` en el peer rival a través de tarpc.
+5. El servidor del rival recibe `"S"`, lo descifra → `"4"`, parsea a `usize` y aplica al tablero.
+6. Ambas operaciones quedan registradas en `crypto.log`.
+
+#### `usuarios.json`
+
+```json
+{
+  "usuarios": [
+    { "usuario": "nodo",     "contrasena": "clave123" },
+    { "usuario": "jugador1", "contrasena": "pass1"    },
+    { "usuario": "jugador2", "contrasena": "pass2"    },
+    { "usuario": "admin",    "contrasena": "admin456" }
+  ]
+}
+```
+
+---
+
 ## Requisitos
 
 - Python 3.x (sin dependencias externas, solo biblioteca estándar)
