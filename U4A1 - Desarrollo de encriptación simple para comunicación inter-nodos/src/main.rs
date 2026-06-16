@@ -6,12 +6,14 @@
 //   Jugador 2: cargo run -- --escucha 8002 --rival 127.0.0.1:8001
 // ─────────────────────────────────────────────────────────
 
+mod auth;
 mod game;
 mod network;
 mod rpc;
 mod ui;
 
 use std::io;
+use std::process;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -27,12 +29,40 @@ use rpc::TicTacToeClient;
 
 const TICK_RATE: Duration = Duration::from_millis(16);
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() {
     // ── Parsear argumentos ──
     let args: Vec<String> = std::env::args().collect();
     let (my_player, listen_port, rival_addr) = parse_args(&args);
 
+    // ── Autenticación: síncrona y bloqueante, antes del runtime async ──
+    // Ningún socket ni tarea tokio se crea si esta compuerta no pasa.
+    let usuario = match auth::autenticar() {
+        Some(u) => u,
+        None => {
+            eprintln!("[Auth] Credenciales incorrectas. Acceso denegado.");
+            process::exit(1);
+        }
+    };
+    println!("[Auth] Bienvenido, {}. Iniciando nodo...\n", usuario);
+
+    // ── Lanzar runtime async sólo tras autenticación exitosa ──
+    let rt = tokio::runtime::Runtime::new().expect("No se pudo crear el runtime de tokio");
+    let resultado = rt.block_on(iniciar_nodo(my_player, listen_port, rival_addr, usuario.clone()));
+
+    // ── Liberar sesión antes de salir (en cualquier caso) ──
+    auth::cerrar_sesion(&usuario);
+
+    if let Err(e) = resultado {
+        eprintln!("[Error] {}", e);
+        process::exit(1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────
+// Lógica async del nodo: servidor RPC + cliente + UI
+// Se invoca únicamente si la autenticación fue exitosa.
+// ─────────────────────────────────────────────────────────
+async fn iniciar_nodo(my_player: u8, listen_port: u16, rival_addr: String, usuario: String) -> anyhow::Result<()> {
     // ── Estado compartido entre servidor RPC y UI ──
     let state = SharedState::new();
 
@@ -50,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let rpc_client = connect_to_peer(&rival_addr).await?;
 
     // ── Inicializar juego ──
-    let mut game = Game::new(my_player);
+    let mut game = Game::new(my_player, usuario);
 
     // ── Inicializar terminal Ratatui ──
     enable_raw_mode()?;

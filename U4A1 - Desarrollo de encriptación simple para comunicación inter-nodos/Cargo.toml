@@ -1,0 +1,28 @@
+[package]
+name = "gato-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gato-p2p"
+path = "src/main.rs"
+
+[dependencies]
+# RPC framework de Google para Rust
+tarpc = { version = "0.37", features = ["tokio1", "serde-transport", "tcp"] }
+
+# Runtime asíncrono (requerido por tarpc)
+tokio = { version = "1", features = ["full"] }
+
+# Serialización de argumentos RPC y lectura de usuarios.json
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-serde = { version = "0.9", features = ["json"] }
+
+# Interfaz de terminal
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Utilidades async
+futures = "0.3"
+anyhow = "1.0"
