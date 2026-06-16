@@ -13,3 +13,6 @@
 [SEND] casilla 8  →  cifrado: "&"
 [RECV] cifrado:    "&"
 [RECV] descifrado: "8"
+[SEND] casilla 0  →  cifrado: "}"
+[RECV] cifrado:    "}"
+[RECV] descifrado: "0"

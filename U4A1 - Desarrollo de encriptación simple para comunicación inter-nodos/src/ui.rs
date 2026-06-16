@@ -63,11 +63,13 @@ fn render_title(frame: &mut Frame, area: Rect, game: &Game) {
 
     let title = Line::from(vec![
         Span::styled("JUEGO DEL GATO  ", Style::default().fg(COLOR_TITLE).add_modifier(Modifier::BOLD)),
-        Span::styled("Tú: ", Style::default().fg(COLOR_DIM)),
+        Span::styled("@", Style::default().fg(COLOR_DIM)),
+        Span::styled(game.usuario.as_str(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled("  Tú: ", Style::default().fg(COLOR_DIM)),
         Span::styled(game.my_symbol(), Style::default().fg(my_color).add_modifier(Modifier::BOLD)),
-        Span::styled("   Rival: ", Style::default().fg(COLOR_DIM)),
+        Span::styled("  Rival: ", Style::default().fg(COLOR_DIM)),
         Span::styled(game.rival_symbol(), Style::default().fg(rival_color).add_modifier(Modifier::BOLD)),
-        Span::styled("   P2P — RPC", Style::default().fg(COLOR_DIM)),
+        Span::styled("  P2P — RPC", Style::default().fg(COLOR_DIM)),
     ]);
 
     let block = Paragraph::new(title)
