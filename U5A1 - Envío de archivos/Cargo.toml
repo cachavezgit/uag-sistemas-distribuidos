@@ -26,3 +26,4 @@ crossterm = "0.28"
 # Utilidades async
 futures = "0.3"
 anyhow = "1.0"
+base64 = "0.22"
