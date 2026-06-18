@@ -14,6 +14,7 @@ mod auth;
 mod game;
 mod network;
 mod rpc;
+mod transfer;
 mod ui;
 
 use std::io;

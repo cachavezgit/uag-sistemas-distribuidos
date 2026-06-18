@@ -65,7 +65,11 @@ pub fn fragment_and_encrypt(path: &str, key: &str) -> anyhow::Result<Vec<FileChu
 /// Descifra y reconstruye el archivo a partir de los chunks recibidos.
 /// Los chunks deben estar ordenados por chunk_index.
 /// Escribe el resultado en `output_dir/file_name` y retorna la ruta.
-pub fn decrypt_and_reconstruct(chunks: &[FileChunk], key: &str, output_dir: &str) -> anyhow::Result<String> {
+pub fn decrypt_and_reconstruct(
+    chunks: &[FileChunk],
+    key: &str,
+    output_dir: &str,
+) -> anyhow::Result<String> {
     if chunks.is_empty() {
         return Err(anyhow::anyhow!("No hay chunks para reconstruir"));
     }
@@ -90,3 +94,109 @@ pub fn decrypt_and_reconstruct(chunks: &[FileChunk], key: &str, output_dir: &str
 
     Ok(output_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+
+    fn tmp(name: &str) -> String {
+        env::temp_dir().join(name).to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn round_trip_archivo_pequeno() {
+        let path = tmp("transfer_test_small.bin");
+        let content = b"Hola mundo! Este es un archivo de prueba con bytes variados: \x01\x02\xFF";
+        fs::write(&path, content).unwrap();
+
+        let key = "clave_prueba";
+        let chunks = fragment_and_encrypt(&path, key).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[0].total_chunks, 1);
+        assert_eq!(chunks[0].file_name, "transfer_test_small.bin");
+        assert_ne!(chunks[0].data, content.to_vec(), "los datos cifrados no deben ser iguales al original");
+
+        let out_dir = tmp("transfer_test_recibidos_small");
+        let out_path = decrypt_and_reconstruct(&chunks, key, &out_dir).unwrap();
+        let recovered = fs::read(&out_path).unwrap();
+
+        assert_eq!(recovered, content.to_vec());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn round_trip_multi_chunk() {
+        let path = tmp("transfer_test_multi.bin");
+        // 2 chunks completos + un chunk parcial de 1000 bytes
+        let content: Vec<u8> = (0u8..=255).cycle().take(CHUNK_SIZE * 2 + 1000).collect();
+        fs::write(&path, &content).unwrap();
+
+        let key = "otra_clave";
+        let chunks = fragment_and_encrypt(&path, key).unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].total_chunks, 3);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.chunk_index, i as u32);
+            assert_eq!(chunk.total_chunks, 3);
+        }
+
+        let out_dir = tmp("transfer_test_recibidos_multi");
+        let out_path = decrypt_and_reconstruct(&chunks, key, &out_dir).unwrap();
+        let recovered = fs::read(&out_path).unwrap();
+
+        assert_eq!(recovered, content);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn clave_incorrecta_produce_contenido_diferente() {
+        let path = tmp("transfer_test_wrong_key.bin");
+        let content = b"contenido secreto de prueba";
+        fs::write(&path, content).unwrap();
+
+        let chunks = fragment_and_encrypt(&path, "clave_correcta").unwrap();
+
+        let out_dir = tmp("transfer_test_recibidos_wrong");
+        // Descifrar con clave incorrecta debe producir bytes distintos al original
+        if let Ok(out_path) = decrypt_and_reconstruct(&chunks, "clave_incorrecta", &out_dir) {
+            if let Ok(recovered) = fs::read(&out_path) {
+                assert_ne!(recovered, content.to_vec());
+                let _ = fs::remove_file(&out_path);
+            }
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn data_cifrada_es_ascii_imprimible() {
+        let path = tmp("transfer_test_ascii.bin");
+        // Archivo binario con todos los valores de byte posibles
+        let content: Vec<u8> = (0u8..=255).collect();
+        fs::write(&path, &content).unwrap();
+
+        let chunks = fragment_and_encrypt(&path, "clave_ascii").unwrap();
+
+        for chunk in &chunks {
+            for &byte in &chunk.data {
+                assert!(
+                    byte >= 32 && byte <= 126,
+                    "byte {} fuera del rango ASCII imprimible (32–126)",
+                    byte
+                );
+            }
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+}
+
