@@ -31,6 +31,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use game::{Game, GameResult};
 use network::{connect_to_peer, iniciar_log, send_move, start_server, SharedState};
 use rpc::TicTacToeClient;
+use tokio::sync::mpsc;
 
 const TICK_RATE: Duration = Duration::from_millis(16);
 
@@ -71,10 +72,11 @@ fn main() {
 // Se invoca únicamente si la autenticación fue exitosa.
 // ─────────────────────────────────────────────────────────
 async fn iniciar_nodo(my_player: u8, listen_port: u16, rival_addr: String, usuario: String, clave: String) -> anyhow::Result<()> {
+    // ── Canal para chunks de archivo recibidos ──
+    let (chunk_tx, _chunk_rx) = mpsc::channel::<transfer::FileChunk>(64);
+
     // ── Estado compartido entre servidor RPC y UI ──
-    // La clave Vigenère se almacena en SharedState para que el servidor
-    // RPC pueda descifrar los payloads entrantes del rival.
-    let state = SharedState::new(clave.clone());
+    let state = SharedState::new(clave.clone(), chunk_tx);
 
     // ── Levantar servidor RPC propio ──
     start_server(listen_port, state.clone()).await?;

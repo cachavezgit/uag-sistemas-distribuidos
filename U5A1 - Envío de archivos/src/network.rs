@@ -18,10 +18,12 @@ use tarpc::{
     server::{self, Channel},
     tokio_serde::formats::Json,
 };
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::crypto;
-use crate::rpc::{MoveResult, TicTacToe, TicTacToeClient};
+use crate::rpc::{ChunkAck, MoveResult, TicTacToe, TicTacToeClient};
+use crate::transfer::FileChunk;
 
 // Escribe una línea al archivo crypto.log sin tocar stdout,
 // evitando interferir con la TUI de Ratatui que usa stdout.
@@ -48,14 +50,17 @@ pub struct SharedState {
     pub rival_disconnected: Arc<Mutex<bool>>,
     /// Clave Vigenère para descifrar los payloads entrantes
     pub clave: Arc<String>,
+    /// Canal para encolar los chunks de archivo recibidos
+    pub chunk_tx: mpsc::Sender<FileChunk>,
 }
 
 impl SharedState {
-    pub fn new(clave: String) -> Self {
+    pub fn new(clave: String, chunk_tx: mpsc::Sender<FileChunk>) -> Self {
         SharedState {
             incoming_move: Arc::new(Mutex::new(None)),
             rival_disconnected: Arc::new(Mutex::new(false)),
             clave: Arc::new(clave),
+            chunk_tx,
         }
     }
 
@@ -112,6 +117,16 @@ impl TicTacToe for TicTacToeServer {
     /// Responde al ping del rival para confirmar que está listo
     async fn ping(self, _: context::Context) -> bool {
         true
+    }
+
+    /// Recibe un chunk de archivo del peer rival y lo encola para reconstrucción.
+    async fn send_chunk(self, _: context::Context, chunk: FileChunk) -> ChunkAck {
+        let idx = chunk.chunk_index;
+        if let Err(e) = self.state.chunk_tx.send(chunk).await {
+            eprintln!("[RPC] Error encolando chunk {}: {}", idx, e);
+            return ChunkAck { chunk_index: idx, ok: false };
+        }
+        ChunkAck { chunk_index: idx, ok: true }
     }
 }
 
