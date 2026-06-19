@@ -19,7 +19,6 @@ mod ui;
 
 use std::io;
 use std::process;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::{
