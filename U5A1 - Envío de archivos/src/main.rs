@@ -19,6 +19,7 @@ mod ui;
 
 use std::io;
 use std::process;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -27,24 +28,21 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use tokio::sync::mpsc;
 
 use game::{Game, GameResult};
-use network::{connect_to_peer, iniciar_log, send_move, start_server, SharedState};
+use network::{connect_to_peer, iniciar_log, send_file_chunks, send_move, start_server, SharedState, TransferProgress};
 use rpc::TicTacToeClient;
-use tokio::sync::mpsc;
+use ui::TransferState;
 
 const TICK_RATE: Duration = Duration::from_millis(16);
 
 fn main() {
-    // ── Parsear argumentos ──
     let args: Vec<String> = std::env::args().collect();
     let (my_player, listen_port, rival_addr, clave) = parse_args(&args);
 
-    // ── Crear crypto.log al arrancar para que `tail -f` funcione de inmediato ──
     iniciar_log();
 
-    // ── Autenticación: síncrona y bloqueante, antes del runtime async ──
-    // Ningún socket ni tarea tokio se crea si esta compuerta no pasa.
     let usuario = match auth::autenticar() {
         Some(u) => u,
         None => {
@@ -54,11 +52,9 @@ fn main() {
     };
     println!("[Auth] Bienvenido, {}. Iniciando nodo...\n", usuario);
 
-    // ── Lanzar runtime async sólo tras autenticación exitosa ──
     let rt = tokio::runtime::Runtime::new().expect("No se pudo crear el runtime de tokio");
     let resultado = rt.block_on(iniciar_nodo(my_player, listen_port, rival_addr, usuario.clone(), clave));
 
-    // ── Liberar sesión antes de salir (en cualquier caso) ──
     auth::cerrar_sesion(&usuario);
 
     if let Err(e) = resultado {
@@ -69,21 +65,23 @@ fn main() {
 
 // ─────────────────────────────────────────────────────────
 // Lógica async del nodo: servidor RPC + cliente + UI
-// Se invoca únicamente si la autenticación fue exitosa.
 // ─────────────────────────────────────────────────────────
-async fn iniciar_nodo(my_player: u8, listen_port: u16, rival_addr: String, usuario: String, clave: String) -> anyhow::Result<()> {
-    // ── Canal para chunks de archivo recibidos ──
-    let (chunk_tx, _chunk_rx) = mpsc::channel::<transfer::FileChunk>(64);
+async fn iniciar_nodo(
+    my_player: u8,
+    listen_port: u16,
+    rival_addr: String,
+    usuario: String,
+    clave: String,
+) -> anyhow::Result<()> {
+    // Canal para chunks de archivo recibidos por el servidor RPC
+    let (chunk_tx, chunk_rx) = mpsc::channel::<transfer::FileChunk>(256);
+    // Canal para reportar progreso de envío a la TUI
+    let (progress_tx, progress_rx) = mpsc::channel::<TransferProgress>(64);
 
-    // ── Estado compartido entre servidor RPC y UI ──
     let state = SharedState::new(clave.clone(), chunk_tx);
 
-    // ── Levantar servidor RPC propio ──
     start_server(listen_port, state.clone()).await?;
 
-    // ── Conectar al peer rival ──
-    // Ambos jugadores levantan su servidor primero, luego conectan.
-    // J1 espera un momento para que J2 también levante el suyo.
     if my_player == 1 {
         println!("[Info] Esperando que el Jugador 2 levante su servidor...");
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -91,10 +89,8 @@ async fn iniciar_nodo(my_player: u8, listen_port: u16, rival_addr: String, usuar
 
     let rpc_client = connect_to_peer(&rival_addr).await?;
 
-    // ── Inicializar juego ──
     let mut game = Game::new(my_player, usuario);
 
-    // ── Inicializar terminal Ratatui ──
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -102,10 +98,18 @@ async fn iniciar_nodo(my_player: u8, listen_port: u16, rival_addr: String, usuar
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    // ── Loop principal ──
-    let result = run_loop(&mut terminal, &mut game, &state, &rpc_client, &clave).await;
+    let result = run_loop(
+        &mut terminal,
+        &mut game,
+        &state,
+        &rpc_client,
+        &clave,
+        chunk_rx,
+        progress_tx,
+        progress_rx,
+    )
+    .await;
 
-    // ── Restaurar terminal ──
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -114,7 +118,7 @@ async fn iniciar_nodo(my_player: u8, listen_port: u16, rival_addr: String, usuar
 }
 
 // ─────────────────────────────────────────────────────────
-// Loop principal: maneja eventos de teclado y llamadas RPC
+// Loop principal: eventos de teclado, RPC de juego y transferencia
 // ─────────────────────────────────────────────────────────
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -122,12 +126,23 @@ async fn run_loop(
     state: &SharedState,
     rpc_client: &TicTacToeClient,
     clave: &str,
+    mut chunk_rx: mpsc::Receiver<transfer::FileChunk>,
+    progress_tx: mpsc::Sender<TransferProgress>,
+    mut progress_rx: mpsc::Receiver<TransferProgress>,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
+    let mut transfer = TransferState {
+        input_active: false,
+        input_path: String::new(),
+        progress: None,
+        last_event: None,
+    };
+
+    // Buffer de chunks recibidos, agrupados por nombre de archivo
+    let mut recv_buffer: Vec<transfer::FileChunk> = Vec::new();
 
     loop {
-        // ── Renderizar frame ──
-        terminal.draw(|frame| ui::render(frame, game))?;
+        terminal.draw(|frame| ui::render(frame, game, &transfer))?;
 
         let timeout = TICK_RATE
             .checked_sub(last_tick.elapsed())
@@ -137,23 +152,68 @@ async fn run_loop(
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
-
-                        KeyCode::Char('r') | KeyCode::Char('R') => {
-                            if game.result != GameResult::Ongoing {
-                                game.reset();
+                    if transfer.input_active {
+                        match key.code {
+                            KeyCode::Esc => {
+                                transfer.input_active = false;
+                                transfer.input_path.clear();
                             }
-                        }
-
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
-                            let digit = c as usize - '1' as usize;
-                            if digit < 9 {
-                                handle_local_move(game, state, rpc_client, digit, clave).await;
+                            KeyCode::Backspace => {
+                                transfer.input_path.pop();
                             }
+                            KeyCode::Enter => {
+                                if !transfer.input_path.is_empty() {
+                                    transfer.input_active = false;
+                                    let path = transfer.input_path.clone();
+                                    transfer.input_path.clear();
+                                    let key_clone = clave.to_string();
+                                    let client_clone = rpc_client.clone();
+                                    let ptx = progress_tx.clone();
+                                    tokio::spawn(async move {
+                                        match transfer::fragment_and_encrypt(&path, &key_clone) {
+                                            Ok(chunks) => {
+                                                if let Err(e) = send_file_chunks(&client_clone, chunks, ptx).await {
+                                                    eprintln!("[Transfer] Error: {}", e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let _ = ptx_err(ptx, e.to_string()).await;
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                // Acepta ruta: alfanumérico, separadores y extensiones comunes
+                                if c.is_alphanumeric() || "/.-_ ".contains(c) {
+                                    transfer.input_path.push(c);
+                                }
+                            }
+                            _ => {}
                         }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Char('Q') => break,
 
-                        _ => {}
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                if game.result != GameResult::Ongoing {
+                                    game.reset();
+                                }
+                            }
+
+                            KeyCode::Char('m') | KeyCode::Char('M') => {
+                                transfer.input_active = true;
+                            }
+
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                let digit = c as usize - '1' as usize;
+                                if digit < 9 {
+                                    handle_local_move(game, state, rpc_client, digit, clave).await;
+                                }
+                            }
+
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -164,9 +224,49 @@ async fn run_loop(
             game.apply_move(casilla);
         }
 
+        // ── Actualizar progreso de envío ──
+        while let Ok(prog) = progress_rx.try_recv() {
+            match &prog {
+                TransferProgress::Done { file_name } => {
+                    transfer.last_event = Some(format!("Enviado: {}", file_name));
+                    transfer.progress = None;
+                }
+                TransferProgress::Error(msg) => {
+                    transfer.last_event = Some(format!("Error: {}", msg));
+                    transfer.progress = None;
+                }
+                TransferProgress::Sending { .. } => {
+                    transfer.progress = Some(prog);
+                }
+            }
+        }
+
+        // ── Chunks recibidos del rival: acumular y reconstruir ──
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            let total = chunk.total_chunks;
+            let idx = chunk.chunk_index;
+            recv_buffer.push(chunk);
+
+            if idx == total - 1 {
+                // Ordenar por índice antes de reconstruir
+                recv_buffer.sort_by_key(|c| c.chunk_index);
+                match transfer::decrypt_and_reconstruct(&recv_buffer, clave, "./recibidos") {
+                    Ok(ruta) => {
+                        let nombre = recv_buffer[0].file_name.clone();
+                        transfer.last_event =
+                            Some(format!("Recibido: {} → {}", nombre, ruta));
+                    }
+                    Err(e) => {
+                        transfer.last_event = Some(format!("Error al recibir: {}", e));
+                    }
+                }
+                recv_buffer.clear();
+            }
+        }
+
         // ── Rival desconectado ──
         if state.is_rival_disconnected() {
-            terminal.draw(|frame| ui::render(frame, game))?;
+            terminal.draw(|frame| ui::render(frame, game, &transfer))?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             break;
         }
@@ -176,6 +276,12 @@ async fn run_loop(
         }
     }
 
+    Ok(())
+}
+
+// Helper para enviar error de transferencia al canal de progreso desde una closure async
+async fn ptx_err(tx: mpsc::Sender<TransferProgress>, msg: String) -> anyhow::Result<()> {
+    let _ = tx.send(TransferProgress::Error(msg)).await;
     Ok(())
 }
 
@@ -196,10 +302,7 @@ async fn handle_local_move(
         return;
     }
 
-    // Aplicar localmente
     game.apply_move(casilla);
-
-    // Cifrar y enviar al peer remoto vía RPC
     send_move(rpc_client, casilla, clave).await;
 }
 
