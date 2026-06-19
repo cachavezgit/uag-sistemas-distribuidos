@@ -192,6 +192,61 @@ pub async fn connect_to_peer(addr: &str) -> anyhow::Result<TicTacToeClient> {
 }
 
 // ─────────────────────────────────────────────────────────
+// Progreso de una transferencia de archivo en curso
+// ─────────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub enum TransferProgress {
+    Sending { current: u32, total: u32, file_name: String },
+    Done { file_name: String },
+    Error(String),
+}
+
+// ─────────────────────────────────────────────────────────
+// Envía todos los chunks de un archivo al peer rival
+// Espera el ChunkAck de cada chunk antes de enviar el siguiente.
+// Reporta progreso por el canal progress_tx para actualizar la TUI.
+// ─────────────────────────────────────────────────────────
+pub async fn send_file_chunks(
+    client: &TicTacToeClient,
+    chunks: Vec<FileChunk>,
+    progress_tx: mpsc::Sender<TransferProgress>,
+) -> anyhow::Result<()> {
+    let total = chunks.len() as u32;
+    let file_name = chunks.first().map(|c| c.file_name.clone()).unwrap_or_default();
+
+    for chunk in chunks {
+        let current = chunk.chunk_index + 1;
+        let _ = progress_tx
+            .send(TransferProgress::Sending {
+                current,
+                total,
+                file_name: file_name.clone(),
+            })
+            .await;
+
+        match client.send_chunk(context::current(), chunk).await {
+            Ok(ack) if ack.ok => {}
+            Ok(ack) => {
+                let msg = format!("Chunk {} rechazado por el receptor", ack.chunk_index);
+                let _ = progress_tx.send(TransferProgress::Error(msg.clone())).await;
+                return Err(anyhow::anyhow!(msg));
+            }
+            Err(e) => {
+                let msg = format!("Error de red enviando chunk {}: {}", current - 1, e);
+                let _ = progress_tx.send(TransferProgress::Error(msg.clone())).await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        }
+    }
+
+    let _ = progress_tx
+        .send(TransferProgress::Done { file_name })
+        .await;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────
 // Envía un movimiento al peer rival vía RPC
 // Serializa la casilla, la cifra con Vigenère y la envía.
 // ─────────────────────────────────────────────────────────
