@@ -9,11 +9,24 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell as RataCell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell as RataCell, Gauge, Paragraph, Row, Table},
     Frame,
 };
 
 use crate::game::{Cell, Game, GameResult};
+use crate::network::TransferProgress;
+
+/// Estado del panel de transferencia de memes que se pasa desde main.rs
+pub struct TransferState {
+    /// true cuando el campo de ruta está activo (el usuario está escribiendo)
+    pub input_active: bool,
+    /// Ruta que el usuario está escribiendo
+    pub input_path: String,
+    /// Progreso de la transferencia en curso (None si no hay ninguna activa)
+    pub progress: Option<TransferProgress>,
+    /// Último mensaje a mostrar cuando no hay transferencia activa
+    pub last_event: Option<String>,
+}
 
 /// Colores del juego
 const COLOR_X: Color = Color::Cyan;
@@ -25,15 +38,24 @@ const COLOR_TITLE: Color = Color::White;
 const COLOR_DIM: Color = Color::DarkGray;
 
 /// Renderiza toda la interfaz en un frame de Ratatui
-pub fn render(frame: &mut Frame, game: &Game) {
-    // ── Layout externo: columna izquierda (juego) / columna derecha (historia) ──
+pub fn render(frame: &mut Frame, game: &Game, transfer: &TransferState) {
+    // ── Layout principal: zona de juego arriba / panel memes abajo ──
+    let main_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),    // zona de juego
+            Constraint::Length(5), // panel de memes
+        ])
+        .split(frame.area());
+
+    // ── Layout de juego: columna izquierda / columna derecha ──
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(60),
             Constraint::Percentage(40),
         ])
-        .split(frame.area());
+        .split(main_rows[0]);
 
     // ── Columna izquierda: título / tablero / estado / controles ──
     let areas = Layout::default()
@@ -53,6 +75,9 @@ pub fn render(frame: &mut Frame, game: &Game) {
 
     // ── Columna derecha: panel Historia ──
     render_history_panel(frame, columns[1], game);
+
+    // ── Panel inferior: transferencia de memes ──
+    render_memes_panel(frame, main_rows[1], transfer);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -234,6 +259,73 @@ fn render_history_panel(frame: &mut Frame, area: Rect, game: &Game) {
         .alignment(Alignment::Left);
 
     frame.render_widget(panel, area);
+}
+
+// ─────────────────────────────────────────────────────────
+// Panel inferior de transferencia de memes
+// ─────────────────────────────────────────────────────────
+fn render_memes_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" MEMES — Transferencia P2P ")
+        .title_alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Magenta));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // ── Campo de input activo: el usuario está escribiendo la ruta ──
+    if transfer.input_active {
+        let path_display = format!("> {}_", transfer.input_path);
+        let lines = vec![
+            Line::from(Span::styled(
+                "Escribe la ruta del archivo y presiona Enter (Esc para cancelar):",
+                Style::default().fg(COLOR_DIM),
+            )),
+            Line::from(Span::styled(
+                path_display,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
+    // ── Transferencia en curso: barra de progreso ──
+    if let Some(TransferProgress::Sending { current, total, file_name }) = &transfer.progress {
+        let ratio = if *total > 0 { *current as f64 / *total as f64 } else { 0.0 };
+        let label = format!("Enviando: {}  {}/{} chunks", file_name, current, total);
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(inner);
+
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(Color::Cyan)),
+            layout[0],
+        );
+        frame.render_widget(
+            Gauge::default()
+                .ratio(ratio)
+                .style(Style::default().fg(Color::Cyan))
+                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray)),
+            layout[1],
+        );
+        return;
+    }
+
+    // ── Estado inactivo: último evento o ayuda ──
+    let msg = if let Some(ev) = &transfer.last_event {
+        ev.clone()
+    } else {
+        "[M] Enviar meme — presiona M para activar el campo de ruta".to_string()
+    };
+
+    frame.render_widget(
+        Paragraph::new(msg).style(Style::default().fg(COLOR_DIM)),
+        inner,
+    );
 }
 
 // ─────────────────────────────────────────────────────────
