@@ -300,7 +300,119 @@ Ambos jugadores deben usar la misma `--clave`. Si se omite, el valor por defecto
 
 ---
 
+### U5A1 — Juego del Gato P2P con Transferencia de Archivos Cifrada (Rust)
+
+Extensión de U4A1 que añade transferencia de archivos binarios sobre el mismo canal RPC del juego. Los archivos se fragmentan en chunks de 64 KB, se codifican en Base64 y se cifran con Vigenère antes de viajar por la red; el receptor los descifra, decodifica y reconstruye automáticamente en `./recibidos/`.
+
+**Ubicación:** `U5A1 - Envío de archivos/`
+
+#### Arquitectura
+
+Sobre la misma arquitectura P2P de U4A1 (autenticación, cifrado Vigenère, TUI Ratatui) se añaden dos canales Tokio y el método RPC `send_chunk`:
+
+```
+run_loop
+  ├─► [Tecla M] FileExplorer modal (ratatui-explorer)
+  │     └─► [Enter] fragment_and_encrypt(path, clave)
+  │               └─► send_file_chunks(client, chunks, progress_tx)
+  │                     └─► client.send_chunk(chunk) → ChunkAck  [por cada chunk]
+  │
+  ├─► chunk_rx  ←  TicTacToeServer::send_chunk (RPC entrante)
+  │     └─► decrypt_and_reconstruct(chunks, clave, "./recibidos")
+  │
+  └─► progress_rx  →  barra de progreso en la TUI
+```
+
+#### Pipeline de cifrado de archivos
+
+```
+Envío:    bytes → Base64 → Vigenère cifrado → Vec<u8> (ASCII 32–126) → RPC
+Recepción: Vec<u8> → Vigenère descifrado → Base64 decode → bytes → archivo
+```
+
+Base64 garantiza que el cifrado Vigenère opere únicamente sobre caracteres imprimibles, aunque el archivo contenga bytes binarios arbitrarios.
+
+#### Módulos
+
+| Archivo | Descripción |
+|---|---|
+| `src/transfer.rs` | **Nuevo.** `FileChunk` (struct serializable con serde), `fragment_and_encrypt` (lee el archivo, lo parte en chunks de 64 KB, Base64-codifica y cifra cada uno) y `decrypt_and_reconstruct` (descifra, decodifica y escribe en `output_dir`). Incluye 5 tests unitarios (round-trip pequeño, multi-chunk, clave incorrecta, 50 MB, ASCII imprimible). |
+| `src/rpc.rs` | Añade el método `send_chunk(chunk: FileChunk) -> ChunkAck` al servicio tarpc y define `ChunkAck { chunk_index, ok }`. |
+| `src/network.rs` | `SharedState` incorpora `chunk_tx: mpsc::Sender<FileChunk>`. Añade `send_file_chunks` (envía chunks secuencialmente esperando `ChunkAck` de cada uno y reportando progreso) y el enum `TransferProgress { Sending, Done, Error }`. `TicTacToeServer::send_chunk` encola el chunk recibido en `chunk_tx`. |
+| `src/main.rs` | Crea los canales `(chunk_tx, chunk_rx)` y `(progress_tx, progress_rx)`. Gestiona el modal de explorador de archivos (`M` lo abre, `Esc` lo cierra, `Enter` dispara la transferencia en un `tokio::spawn`). Reconstruye el archivo cuando llega el último chunk. |
+| `src/ui.rs` | Panel de transferencia en la parte inferior de la TUI: muestra barra de progreso con `Gauge` durante el envío y el último evento (enviado/recibido/error). El explorador de archivos se superpone como overlay modal. |
+| `src/auth.rs` | Sin cambios respecto a U4A1. |
+| `src/crypto.rs` | Sin cambios respecto a U4A1. |
+| `src/game.rs` | Sin cambios respecto a U4A1. |
+
+#### Cómo ejecutar
+
+```bash
+cd "U5A1 - Envío de archivos"
+
+# Terminal 1 — Jugador 1
+cargo run -- --jugador 1 --escucha 8001 --rival 127.0.0.1:8002 --clave misecreta
+
+# Terminal 2 — Jugador 2
+cargo run -- --jugador 2 --escucha 8002 --rival 127.0.0.1:8001 --clave misecreta
+
+# Opcional: ver el log de cifrado en tiempo real
+tail -f crypto.log
+```
+
+Ambos jugadores deben usar la misma `--clave`. Si se omite, el valor por defecto es `clave_defecto`.
+
+#### Controles
+
+| Tecla | Acción |
+|---|---|
+| `1` – `9` | Seleccionar casilla del tablero |
+| `M` | Abrir explorador de archivos para enviar un archivo al rival |
+| `Esc` | Cerrar el explorador de archivos sin enviar |
+| `Enter` | Confirmar archivo seleccionado e iniciar transferencia |
+| `R` | Reiniciar partida al terminar |
+| `Q` | Salir del juego y cerrar sesión |
+
+#### Flujo de una transferencia
+
+1. El jugador presiona `M`; se abre el modal de explorador de archivos.
+2. Navega con las flechas hasta seleccionar un archivo y presiona `Enter`.
+3. `fragment_and_encrypt` lee el archivo, lo parte en chunks de 64 KB, codifica cada uno en Base64 y lo cifra con Vigenère.
+4. `send_file_chunks` envía los chunks uno a uno vía `send_chunk` RPC, esperando el `ChunkAck` de cada uno. La TUI muestra una barra de progreso.
+5. El receptor encola cada chunk en `chunk_rx` al recibirlo.
+6. Cuando llega el chunk con `chunk_index == total_chunks - 1`, `decrypt_and_reconstruct` descifra, decodifica y escribe el archivo en `./recibidos/<nombre_original>`.
+7. La TUI del receptor muestra `Recibido: <nombre> → ./recibidos/<nombre>`.
+
+#### Tests unitarios (`src/transfer.rs`)
+
+| Test | Descripción |
+|---|---|
+| `round_trip_archivo_pequeno` | Cifra y reconstruye un archivo de < 64 KB; verifica contenido idéntico. |
+| `round_trip_multi_chunk` | Archivo de 2 chunks completos + 1 parcial; verifica orden y contenido. |
+| `clave_incorrecta_produce_contenido_diferente` | Descifrar con clave errónea produce bytes distintos al original. |
+| `round_trip_archivo_50mb` | Archivo de 50 MB (800 chunks); verifica conteo y contenido byte a byte. |
+| `data_cifrada_es_ascii_imprimible` | Todos los bytes cifrados están en el rango 32–126. |
+
+**Cómo ejecutar los tests:**
+
+```bash
+cd "U5A1 - Envío de archivos"
+
+# Ejecutar todos los tests
+cargo test
+
+# Ejecutar solo los tests de transfer.rs
+cargo test --test-threads=1 -- transfer::
+
+# Ejecutar un test específico (ej. el de 50 MB)
+cargo test round_trip_archivo_50mb -- --nocapture
+```
+
+> El flag `--test-threads=1` es recomendable porque varios tests escriben archivos temporales en el mismo directorio del sistema operativo (`std::env::temp_dir()`); ejecutarlos en paralelo puede causar colisiones de nombres.
+
+---
+
 ## Requisitos
 
 - Python 3.x (sin dependencias externas, solo biblioteca estándar)
-- Rust + Cargo (para las actividades U2A1, U3A1 y U4A1)
+- Rust + Cargo (para las actividades U2A1, U3A1, U4A1 y U5A1)
