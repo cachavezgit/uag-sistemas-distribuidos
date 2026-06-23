@@ -178,6 +178,35 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_archivo_50mb() {
+        let path = tmp("transfer_test_50mb.bin");
+        // 50 MB exactos → debe generar 800 chunks de 64 KB
+        let size = 50 * 1024 * 1024;
+        let content: Vec<u8> = (0u8..=255).cycle().take(size).collect();
+        fs::write(&path, &content).unwrap();
+
+        let key = "clave_50mb";
+        let chunks = fragment_and_encrypt(&path, key).unwrap();
+
+        let expected_chunks = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        assert_eq!(chunks.len(), expected_chunks, "número incorrecto de chunks para 50 MB");
+        assert_eq!(chunks[0].total_chunks, expected_chunks as u32);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.chunk_index, i as u32);
+        }
+
+        let out_dir = tmp("transfer_test_recibidos_50mb");
+        let out_path = decrypt_and_reconstruct(&chunks, key, &out_dir).unwrap();
+        let recovered = fs::read(&out_path).unwrap();
+
+        assert_eq!(recovered.len(), size, "el archivo reconstruido tiene tamaño incorrecto");
+        assert_eq!(recovered, content, "el contenido reconstruido no coincide con el original");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&out_path);
+    }
+
+    #[test]
     fn data_cifrada_es_ascii_imprimible() {
         let path = tmp("transfer_test_ascii.bin");
         // Archivo binario con todos los valores de byte posibles

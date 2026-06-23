@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 use game::{Game, GameResult};
 use network::{connect_to_peer, iniciar_log, send_file_chunks, send_move, start_server, SharedState, TransferProgress};
 use rpc::TicTacToeClient;
+use ratatui_explorer::FileExplorer;
 use ui::TransferState;
 
 const TICK_RATE: Duration = Duration::from_millis(16);
@@ -131,8 +132,7 @@ async fn run_loop(
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut transfer = TransferState {
-        input_active: false,
-        input_path: String::new(),
+        explorer: None,
         progress: None,
         last_event: None,
     };
@@ -149,22 +149,28 @@ async fn run_loop(
 
         // ── Eventos de teclado ──
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if transfer.input_active {
+            let ev = event::read()?;
+
+            if transfer.explorer.is_some() {
+                // Reenviar el evento al explorador antes de inspeccionar teclas
+                if let Some(ref mut explorer) = transfer.explorer {
+                    let _ = explorer.handle(&ev);
+                }
+
+                if let Event::Key(key) = &ev {
+                    if key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Esc => {
-                                transfer.input_active = false;
-                                transfer.input_path.clear();
-                            }
-                            KeyCode::Backspace => {
-                                transfer.input_path.pop();
+                                transfer.explorer = None;
                             }
                             KeyCode::Enter => {
-                                if !transfer.input_path.is_empty() {
-                                    transfer.input_active = false;
-                                    let path = transfer.input_path.clone();
-                                    transfer.input_path.clear();
+                                // Extraer path si el elemento seleccionado es un archivo
+                                let maybe_path = transfer.explorer.as_ref()
+                                    .filter(|e| e.current().is_file())
+                                    .map(|e| e.current().path().to_string_lossy().to_string());
+
+                                if let Some(path) = maybe_path {
+                                    transfer.explorer = None;
                                     let key_clone = clave.to_string();
                                     let client_clone = rpc_client.clone();
                                     let ptx = progress_tx.clone();
@@ -176,43 +182,41 @@ async fn run_loop(
                                                 }
                                             }
                                             Err(e) => {
-                                                let _ = ptx_err(ptx, e.to_string()).await;
+                                                let _ = ptx.send(TransferProgress::Error(e.to_string())).await;
                                             }
                                         }
                                     });
                                 }
                             }
-                            KeyCode::Char(c) => {
-                                // Acepta ruta: alfanumérico, separadores y extensiones comunes
-                                if c.is_alphanumeric() || "/.-_ ".contains(c) {
-                                    transfer.input_path.push(c);
-                                }
-                            }
                             _ => {}
                         }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                    }
+                }
+            } else if let Event::Key(key) = ev {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
 
-                            KeyCode::Char('r') | KeyCode::Char('R') => {
-                                if game.result != GameResult::Ongoing {
-                                    game.reset();
-                                }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            if game.result != GameResult::Ongoing {
+                                game.reset();
                             }
-
-                            KeyCode::Char('m') | KeyCode::Char('M') => {
-                                transfer.input_active = true;
-                            }
-
-                            KeyCode::Char(c) if c.is_ascii_digit() => {
-                                let digit = c as usize - '1' as usize;
-                                if digit < 9 {
-                                    handle_local_move(game, state, rpc_client, digit, clave).await;
-                                }
-                            }
-
-                            _ => {}
                         }
+
+                        KeyCode::Char('m') | KeyCode::Char('M') => {
+                            if let Ok(explorer) = FileExplorer::new() {
+                                transfer.explorer = Some(explorer);
+                            }
+                        }
+
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            let digit = c as usize - '1' as usize;
+                            if digit < 9 {
+                                handle_local_move(game, state, rpc_client, digit, clave).await;
+                            }
+                        }
+
+                        _ => {}
                     }
                 }
             }
@@ -275,12 +279,6 @@ async fn run_loop(
         }
     }
 
-    Ok(())
-}
-
-// Helper para enviar error de transferencia al canal de progreso desde una closure async
-async fn ptx_err(tx: mpsc::Sender<TransferProgress>, msg: String) -> anyhow::Result<()> {
-    let _ = tx.send(TransferProgress::Error(msg)).await;
     Ok(())
 }
 

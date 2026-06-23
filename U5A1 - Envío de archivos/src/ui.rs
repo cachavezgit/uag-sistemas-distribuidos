@@ -9,19 +9,18 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell as RataCell, Gauge, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell as RataCell, Clear, Gauge, Paragraph, Row, Table},
     Frame,
 };
+use ratatui_explorer::FileExplorer;
 
 use crate::game::{Cell, Game, GameResult};
 use crate::network::TransferProgress;
 
 /// Estado del panel de transferencia de memes que se pasa desde main.rs
 pub struct TransferState {
-    /// true cuando el campo de ruta está activo (el usuario está escribiendo)
-    pub input_active: bool,
-    /// Ruta que el usuario está escribiendo
-    pub input_path: String,
+    /// Explorador de archivos modal (Some = abierto, None = cerrado)
+    pub explorer: Option<FileExplorer>,
     /// Progreso de la transferencia en curso (None si no hay ninguna activa)
     pub progress: Option<TransferProgress>,
     /// Último mensaje a mostrar cuando no hay transferencia activa
@@ -78,6 +77,13 @@ pub fn render(frame: &mut Frame, game: &Game, transfer: &TransferState) {
 
     // ── Panel inferior: transferencia de memes ──
     render_memes_panel(frame, main_rows[1], transfer);
+
+    // ── Overlay del explorador de archivos (encima de todo) ──
+    if let Some(explorer) = &transfer.explorer {
+        let area = centered_rect(70, 75, frame.area());
+        frame.render_widget(Clear, area);
+        frame.render_widget_ref(explorer.widget(), area);
+    }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -111,7 +117,6 @@ fn render_board(frame: &mut Frame, area: Rect, game: &Game) {
     let (my_color, rival_color) = player_colors(game);
     let winner_cells = winning_cells(game);
 
-    // Construir las 3 filas del tablero
     let rows: Vec<Row> = (0..3)
         .map(|row| {
             let cells: Vec<RataCell> = (0..3)
@@ -119,21 +124,18 @@ fn render_board(frame: &mut Frame, area: Rect, game: &Game) {
                     let idx = row * 3 + col;
                     let cell_content = &game.board[idx];
 
-                    // Color base de la celda
                     let base_style = match cell_content {
                         Cell::X => Style::default().fg(my_color_for(Cell::X, my_color, rival_color)),
                         Cell::O => Style::default().fg(my_color_for(Cell::O, my_color, rival_color)),
                         Cell::Empty => Style::default().fg(COLOR_DIM),
                     };
 
-                    // Resaltar celdas ganadoras
                     let style = if winner_cells.contains(&idx) {
                         base_style.fg(COLOR_WIN).add_modifier(Modifier::BOLD)
                     } else {
                         base_style.add_modifier(Modifier::BOLD)
                     };
 
-                    // Mostrar número de casilla si está vacía, símbolo si está ocupada
                     let label = match cell_content {
                         Cell::Empty => format!("  {}  ", idx + 1),
                         Cell::X => "  X  ".to_string(),
@@ -148,7 +150,6 @@ fn render_board(frame: &mut Frame, area: Rect, game: &Game) {
         })
         .collect();
 
-    // Anchos iguales para las 3 columnas
     let widths = [
         Constraint::Percentage(33),
         Constraint::Percentage(33),
@@ -202,7 +203,7 @@ fn render_status(frame: &mut Frame, area: Rect, game: &Game) {
 // Panel de controles
 // ─────────────────────────────────────────────────────────
 fn render_help(frame: &mut Frame, area: Rect) {
-    let help = Paragraph::new("  1-9: elegir casilla   |   R: reiniciar   |   Q: salir")
+    let help = Paragraph::new("  1-9: elegir casilla   |   R: reiniciar   |   M: enviar meme   |   Q: salir")
         .style(Style::default().fg(COLOR_DIM))
         .block(Block::default().borders(Borders::ALL).title(" Controles "))
         .alignment(Alignment::Center);
@@ -274,20 +275,13 @@ fn render_memes_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // ── Campo de input activo: el usuario está escribiendo la ruta ──
-    if transfer.input_active {
-        let path_display = format!("> {}_", transfer.input_path);
-        let lines = vec![
-            Line::from(Span::styled(
-                "Escribe la ruta del archivo y presiona Enter (Esc para cancelar):",
-                Style::default().fg(COLOR_DIM),
-            )),
-            Line::from(Span::styled(
-                path_display,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
+    // ── Explorador abierto ──
+    if transfer.explorer.is_some() {
+        frame.render_widget(
+            Paragraph::new("Selecciona un archivo en el explorador (Enter = enviar, Esc = cancelar)")
+                .style(Style::default().fg(COLOR_DIM)),
+            inner,
+        );
         return;
     }
 
@@ -319,7 +313,7 @@ fn render_memes_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
     let msg = if let Some(ev) = &transfer.last_event {
         ev.clone()
     } else {
-        "[M] Enviar meme — presiona M para activar el campo de ruta".to_string()
+        "[M] Enviar meme — abre el explorador de archivos".to_string()
     };
 
     frame.render_widget(
@@ -343,9 +337,6 @@ fn player_colors(game: &Game) -> (Color, Color) {
 
 /// Retorna el color correspondiente a una celda X u O
 fn my_color_for(cell: Cell, my_color: Color, rival_color: Color) -> Color {
-    // X siempre es J1 (COLOR_X), O siempre es J2 (COLOR_O)
-    // pero desde la perspectiva de cada peer, coloreamos
-    // "mi color" vs "color rival"
     match cell {
         Cell::X => my_color,
         Cell::O => rival_color,
@@ -371,4 +362,28 @@ fn winning_cells(game: &Game) -> Vec<usize> {
         }
     }
     vec![]
+}
+
+/// Retorna un Rect centrado con los porcentajes dados respecto al área padre
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let margin_v = (100 - percent_y) / 2;
+    let margin_h = (100 - percent_x) / 2;
+
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(margin_v),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage(margin_v),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(margin_h),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage(margin_h),
+        ])
+        .split(vert[1])[1]
 }

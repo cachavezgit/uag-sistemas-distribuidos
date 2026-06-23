@@ -47,3 +47,7 @@ target/
 
 # Notas de sesión
 session_notes.md
+
+# Archivos generados en runtime
+recibidos/
+crypto.log
