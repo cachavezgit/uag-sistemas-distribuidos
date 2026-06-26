@@ -9,6 +9,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -199,6 +200,23 @@ pub enum TransferProgress {
     Sending { current: u32, total: u32, file_name: String },
     Done { file_name: String },
     Error(String),
+    /// Archivo de video reconstruido y listo para reproducir
+    VideoReady(PathBuf),
+    /// El reproductor no pudo arrancar o el video no se pudo reproducir
+    VideoError(String),
+}
+
+/// Extensiones de video reconocidas para distinguir un archivo de video
+/// de un archivo cualquiera (p.ej. los memes) al terminar su reconstrucción.
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "mpg", "mpeg"];
+
+/// true si `file_name` tiene una extensión de video conocida.
+pub fn is_video_file(file_name: &str) -> bool {
+    Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 // ─────────────────────────────────────────────────────────

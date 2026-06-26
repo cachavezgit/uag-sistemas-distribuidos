@@ -19,6 +19,7 @@ mod transfer;
 mod ui;
 
 use std::io;
+use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, Instant};
 
@@ -242,6 +243,13 @@ async fn run_loop(
                 TransferProgress::Sending { .. } => {
                     transfer.progress = Some(prog);
                 }
+                // TODO(Tarea 3/4): reflejar en transfer.video_state y lanzar PlayerHandle
+                TransferProgress::VideoReady(path) => {
+                    transfer.last_event = Some(format!("Video listo: {}", path.display()));
+                }
+                TransferProgress::VideoError(msg) => {
+                    transfer.last_event = Some(format!("Error de video: {}", msg));
+                }
             }
         }
 
@@ -254,14 +262,28 @@ async fn run_loop(
             if idx == total - 1 {
                 // Ordenar por índice antes de reconstruir
                 recv_buffer.sort_by_key(|c| c.chunk_index);
+                let nombre = recv_buffer[0].file_name.clone();
+                let es_video = network::is_video_file(&nombre);
+
                 match transfer::decrypt_and_reconstruct(&recv_buffer, clave, "./recibidos") {
                     Ok(ruta) => {
-                        let nombre = recv_buffer[0].file_name.clone();
-                        transfer.last_event =
-                            Some(format!("Recibido: {} → {}", nombre, ruta));
+                        if es_video {
+                            let _ = progress_tx
+                                .send(TransferProgress::VideoReady(PathBuf::from(&ruta)))
+                                .await;
+                        } else {
+                            transfer.last_event =
+                                Some(format!("Recibido: {} → {}", nombre, ruta));
+                        }
                     }
                     Err(e) => {
-                        transfer.last_event = Some(format!("Error al recibir: {}", e));
+                        if es_video {
+                            let _ = progress_tx
+                                .send(TransferProgress::VideoError(e.to_string()))
+                                .await;
+                        } else {
+                            transfer.last_event = Some(format!("Error al recibir: {}", e));
+                        }
                     }
                 }
                 recv_buffer.clear();
