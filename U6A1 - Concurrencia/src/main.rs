@@ -13,6 +13,7 @@ mod crypto;
 mod auth;
 mod game;
 mod network;
+mod player;
 mod rpc;
 mod transfer;
 mod ui;
