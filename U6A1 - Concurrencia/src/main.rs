@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 
 use game::{Game, GameResult};
 use network::{connect_to_peer, iniciar_log, send_file_chunks, send_move, start_server, SharedState, TransferProgress};
+use player::PlayerHandle;
 use rpc::TicTacToeClient;
 use ratatui_explorer::FileExplorer;
 use ui::{TransferState, VideoState};
@@ -143,6 +144,12 @@ async fn run_loop(
     // Buffer de chunks recibidos, agrupados por nombre de archivo
     let mut recv_buffer: Vec<transfer::FileChunk> = Vec::new();
 
+    // true si el explorador abierto/la transferencia en curso es de video (tecla V),
+    // false si es de memes (tecla M) — distingue a quién enrutar el progreso recibido.
+    let mut video_mode = false;
+    // Reproductor activo (Some mientras haya un video en reproducción)
+    let mut player_handle: Option<PlayerHandle> = None;
+
     loop {
         terminal.draw(|frame| ui::render(frame, game, &transfer))?;
 
@@ -174,21 +181,33 @@ async fn run_loop(
 
                                 if let Some(path) = maybe_path {
                                     transfer.explorer = None;
-                                    let key_clone = clave.to_string();
-                                    let client_clone = rpc_client.clone();
-                                    let ptx = progress_tx.clone();
-                                    tokio::spawn(async move {
-                                        match transfer::fragment_and_encrypt(&path, &key_clone) {
-                                            Ok(chunks) => {
-                                                if let Err(e) = send_file_chunks(&client_clone, chunks, ptx).await {
-                                                    eprintln!("[Transfer] Error: {}", e);
+
+                                    if video_mode && !network::is_video_file(&path) {
+                                        transfer.video_state = VideoState::Error(
+                                            "Selecciona un archivo de video (.mp4 .mkv .avi .mov .webm)"
+                                                .to_string(),
+                                        );
+                                    } else {
+                                        if video_mode {
+                                            transfer.video_state =
+                                                VideoState::Transmitiendo { chunk_actual: 0, total: 0 };
+                                        }
+                                        let key_clone = clave.to_string();
+                                        let client_clone = rpc_client.clone();
+                                        let ptx = progress_tx.clone();
+                                        tokio::spawn(async move {
+                                            match transfer::fragment_and_encrypt(&path, &key_clone) {
+                                                Ok(chunks) => {
+                                                    if let Err(e) = send_file_chunks(&client_clone, chunks, ptx).await {
+                                                        eprintln!("[Transfer] Error: {}", e);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = ptx.send(TransferProgress::Error(e.to_string())).await;
                                                 }
                                             }
-                                            Err(e) => {
-                                                let _ = ptx.send(TransferProgress::Error(e.to_string())).await;
-                                            }
-                                        }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             _ => {}
@@ -198,7 +217,14 @@ async fn run_loop(
             } else if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                        KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            if let Some(mut handle) = player_handle.take() {
+                                let _ = handle.stop();
+                                transfer.video_state = VideoState::Inactivo;
+                            } else {
+                                break;
+                            }
+                        }
 
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             if game.result != GameResult::Ongoing {
@@ -209,6 +235,15 @@ async fn run_loop(
                         KeyCode::Char('m') | KeyCode::Char('M') => {
                             if let Ok(explorer) = FileExplorer::new() {
                                 transfer.explorer = Some(explorer);
+                                video_mode = false;
+                            }
+                        }
+
+                        KeyCode::Char('v') | KeyCode::Char('V') => {
+                            if let Ok(explorer) = FileExplorer::new() {
+                                transfer.explorer = Some(explorer);
+                                transfer.video_state = VideoState::Explorando;
+                                video_mode = true;
                             }
                         }
 
@@ -234,20 +269,47 @@ async fn run_loop(
         while let Ok(prog) = progress_rx.try_recv() {
             match &prog {
                 TransferProgress::Done { file_name } => {
-                    transfer.last_event = Some(format!("Enviado: {}", file_name));
-                    transfer.progress = None;
+                    if video_mode {
+                        transfer.video_state = VideoState::Inactivo;
+                        transfer.last_event = Some(format!("Video enviado: {}", file_name));
+                        video_mode = false;
+                    } else {
+                        transfer.last_event = Some(format!("Enviado: {}", file_name));
+                        transfer.progress = None;
+                    }
                 }
                 TransferProgress::Error(msg) => {
-                    transfer.last_event = Some(format!("Error: {}", msg));
-                    transfer.progress = None;
+                    if video_mode {
+                        transfer.video_state = VideoState::Error(msg.clone());
+                        video_mode = false;
+                    } else {
+                        transfer.last_event = Some(format!("Error: {}", msg));
+                        transfer.progress = None;
+                    }
                 }
-                TransferProgress::Sending { .. } => {
-                    transfer.progress = Some(prog);
+                TransferProgress::Sending { current, total, .. } => {
+                    let (current, total) = (*current, *total);
+                    if video_mode {
+                        transfer.video_state = VideoState::Transmitiendo {
+                            chunk_actual: current as usize,
+                            total: total as usize,
+                        };
+                    } else {
+                        transfer.progress = Some(prog);
+                    }
                 }
                 TransferProgress::VideoReady(path) => {
-                    transfer.video_state = VideoState::Reproduciendo;
-                    transfer.last_event = Some(format!("Video listo: {}", path.display()));
-                    // TODO(Tarea 4): lanzar PlayerHandle::play_file(path) y guardar el handle
+                    match PlayerHandle::play_file(path) {
+                        Ok(handle) => {
+                            transfer.video_state = VideoState::Reproduciendo;
+                            transfer.last_event =
+                                Some(format!("Reproduciendo con {}: {}", handle.player.path(), path.display()));
+                            player_handle = Some(handle);
+                        }
+                        Err(e) => {
+                            transfer.video_state = VideoState::Error(e.to_string());
+                        }
+                    }
                 }
                 TransferProgress::VideoError(msg) => {
                     transfer.video_state = VideoState::Error(msg.clone());
@@ -292,6 +354,14 @@ async fn run_loop(
                     }
                 }
                 recv_buffer.clear();
+            }
+        }
+
+        // ── El reproductor terminó por su cuenta (ffplay -autoexit al acabar el video) ──
+        if let Some(handle) = player_handle.as_mut() {
+            if !handle.is_running() {
+                player_handle = None;
+                transfer.video_state = VideoState::Inactivo;
             }
         }
 

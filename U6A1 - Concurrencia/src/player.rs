@@ -101,6 +101,8 @@ impl PlayerHandle {
 
     /// U7-ready: Abre el reproductor con stdin pipe para stream en tiempo real.
     /// Retorna el handle y el `ChildStdin` para que network.rs escriba chunks.
+    /// Sin uso en U6 (no hay video en vivo todavía); se mantiene lista para U7.
+    #[allow(dead_code)]
     pub fn open_stream() -> Result<(Self, std::process::ChildStdin)> {
         let player = Player::detect()?;
 

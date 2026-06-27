@@ -30,20 +30,15 @@ pub struct TransferState {
 }
 
 /// Estado del panel de streaming de video (U6 A1)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum VideoState {
+    #[default]
     Inactivo,
     Explorando,
     Transmitiendo { chunk_actual: usize, total: usize },
     Reconstruyendo,
     Reproduciendo,
     Error(String),
-}
-
-impl Default for VideoState {
-    fn default() -> Self {
-        VideoState::Inactivo
-    }
 }
 
 /// Colores del juego
