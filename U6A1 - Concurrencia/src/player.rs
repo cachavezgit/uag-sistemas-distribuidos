@@ -36,6 +36,9 @@ impl Player {
         Err(anyhow!("No se encontró ffplay ni mpv instalado en el sistema"))
     }
 
+    /// Sin uso en main.rs desde que se quitó el aviso de "Streaming: archivo
+    /// con <path>" del panel de memes; se mantiene como capacidad del módulo.
+    #[allow(dead_code)]
     pub fn path(&self) -> &str {
         match self {
             Player::Ffplay(p) => p,
@@ -71,6 +74,9 @@ fn find_binary(name: &str) -> Option<String> {
 // ─────────────────────────────────────────────────────────
 pub struct PlayerHandle {
     child: Child,
+    // Sin lectores desde que se quitó el aviso del panel de memes; se
+    // mantiene para identificar qué reproductor abrió este proceso.
+    #[allow(dead_code)]
     pub player: Player,
 }
 

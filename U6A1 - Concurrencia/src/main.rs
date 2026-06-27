@@ -340,8 +340,6 @@ async fn run_loop(
                         Ok((handle, stdin)) => {
                             transfer.video_state = VideoState::Reproduciendo;
                             transfer.video_streaming = true;
-                            transfer.last_event =
-                                Some(format!("Streaming: {} con {}", nombre, handle.player.path()));
                             player_handle = Some(handle);
                             video_stdin = Some(stdin);
                         }

@@ -47,6 +47,7 @@ target/
 
 # Notas de sesión
 session_notes.md
+mds/
 
 # Archivos generados en runtime
 recibidos/
