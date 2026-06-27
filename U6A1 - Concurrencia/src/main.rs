@@ -19,7 +19,6 @@ mod transfer;
 mod ui;
 
 use std::io;
-use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, Instant};
 
@@ -139,9 +138,11 @@ async fn run_loop(
         progress: None,
         last_event: None,
         video_state: VideoState::default(),
+        video_streaming: false,
     };
 
-    // Buffer de chunks recibidos, agrupados por nombre de archivo
+    // Buffer de chunks recibidos, agrupados por nombre de archivo (solo memes —
+    // el video ya no se bufferea, se transmite al reproductor en tiempo real)
     let mut recv_buffer: Vec<transfer::FileChunk> = Vec::new();
 
     // true si el explorador abierto/la transferencia en curso es de video (tecla V),
@@ -149,6 +150,13 @@ async fn run_loop(
     let mut video_mode = false;
     // Reproductor activo (Some mientras haya un video en reproducción)
     let mut player_handle: Option<PlayerHandle> = None;
+    // Stdin del proceso del reproductor para streaming en tiempo real.
+    // Some mientras un video se está recibiendo y reproduciendo simultáneamente.
+    let mut video_stdin: Option<std::process::ChildStdin> = None;
+    // true tras presionar [Q] mientras un video se recibía a medias: el emisor
+    // no se entera y sigue mandando chunks del mismo archivo, así que hay que
+    // descartarlos en silencio en vez de reabrir el reproductor por cada uno.
+    let mut video_cancelado = false;
 
     loop {
         terminal.draw(|frame| ui::render(frame, game, &transfer))?;
@@ -219,6 +227,13 @@ async fn run_loop(
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => {
                             if let Some(mut handle) = player_handle.take() {
+                                if video_stdin.is_some() {
+                                    // Todavía había pipe abierto: quedan chunks de este
+                                    // video en camino, hay que ignorarlos en silencio.
+                                    video_cancelado = true;
+                                }
+                                video_stdin = None; // cerrar el pipe antes de matar el proceso
+                                transfer.video_streaming = false;
                                 let _ = handle.stop();
                                 transfer.video_state = VideoState::Inactivo;
                             } else {
@@ -298,62 +313,95 @@ async fn run_loop(
                         transfer.progress = Some(prog);
                     }
                 }
-                TransferProgress::VideoReady(path) => {
-                    match PlayerHandle::play_file(path) {
-                        Ok(handle) => {
+            }
+        }
+
+        // ── Chunks recibidos del rival ──
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            let total = chunk.total_chunks;
+            let idx = chunk.chunk_index;
+            let nombre = chunk.file_name.clone();
+            let es_video = network::is_video_file(&nombre);
+
+            if es_video {
+                if video_cancelado {
+                    // El usuario ya detuvo este video con [Q]: descartar en silencio
+                    // lo que quede en camino, sin reabrir el reproductor.
+                    if idx == total - 1 {
+                        video_cancelado = false;
+                    }
+                    continue;
+                }
+
+                // ── Streaming en vivo: descifrar y escribir al pipe de inmediato ──
+                if video_stdin.is_none() {
+                    // Primer chunk de este video: abrir el reproductor con stdin pipe
+                    match PlayerHandle::open_stream() {
+                        Ok((handle, stdin)) => {
                             transfer.video_state = VideoState::Reproduciendo;
+                            transfer.video_streaming = true;
                             transfer.last_event =
-                                Some(format!("Reproduciendo con {}: {}", handle.player.path(), path.display()));
+                                Some(format!("Streaming: {} con {}", nombre, handle.player.path()));
                             player_handle = Some(handle);
+                            video_stdin = Some(stdin);
                         }
                         Err(e) => {
                             transfer.video_state = VideoState::Error(e.to_string());
                         }
                     }
                 }
-                TransferProgress::VideoError(msg) => {
-                    transfer.video_state = VideoState::Error(msg.clone());
+
+                if let Some(ref mut stdin) = video_stdin {
+                    match network::decrypt_chunk_bytes(&chunk, clave) {
+                        Ok(bytes) => {
+                            use std::io::Write;
+                            if let Err(e) = stdin.write_all(&bytes) {
+                                // El reproductor cerró el pipe (p.ej. el usuario cerró la ventana)
+                                transfer.video_state = VideoState::Error(format!("Pipe cerrado: {}", e));
+                                video_stdin = None;
+                                transfer.video_streaming = false;
+                                player_handle = None;
+                            }
+                        }
+                        Err(e) => {
+                            transfer.video_state =
+                                VideoState::Error(format!("Error descifrando chunk {}: {}", idx, e));
+                        }
+                    }
                 }
-            }
-        }
 
-        // ── Chunks recibidos del rival: acumular y reconstruir ──
-        while let Ok(chunk) = chunk_rx.try_recv() {
-            let total = chunk.total_chunks;
-            let idx = chunk.chunk_index;
-            recv_buffer.push(chunk);
-
-            if idx == total - 1 {
-                // Ordenar por índice antes de reconstruir
-                recv_buffer.sort_by_key(|c| c.chunk_index);
-                let nombre = recv_buffer[0].file_name.clone();
-                let es_video = network::is_video_file(&nombre);
-                if es_video {
-                    transfer.video_state = VideoState::Reconstruyendo;
+                if idx == total - 1 {
+                    // Cerrar el pipe: el reproductor detecta EOF y termina solo al
+                    // acabar de reproducir lo que ya tenía en buffer (ver más abajo).
+                    video_stdin = None;
+                    transfer.video_streaming = false;
                 }
 
-                match transfer::decrypt_and_reconstruct(&recv_buffer, clave, "./recibidos") {
-                    Ok(ruta) => {
-                        if es_video {
-                            let _ = progress_tx
-                                .send(TransferProgress::VideoReady(PathBuf::from(&ruta)))
-                                .await;
-                        } else {
+                // Procesar a lo sumo un chunk de video por vuelta del loop principal:
+                // stdin.write_all() es bloqueante, y si el pipe se llena (ffplay no
+                // consume tan rápido como llegan los chunks), este `while` podía quedarse
+                // escribiendo chunk tras chunk sin devolver el control a event::poll(),
+                // dejando [Q] (y cualquier tecla) sin leerse hasta drenar todo el canal.
+                break;
+            } else {
+                // ── Memes y otros archivos: sin cambios respecto al comportamiento original ──
+                recv_buffer.push(chunk);
+
+                if idx == total - 1 {
+                    recv_buffer.sort_by_key(|c| c.chunk_index);
+                    let nombre = recv_buffer[0].file_name.clone();
+
+                    match transfer::decrypt_and_reconstruct(&recv_buffer, clave, "./recibidos") {
+                        Ok(ruta) => {
                             transfer.last_event =
                                 Some(format!("Recibido: {} → {}", nombre, ruta));
                         }
-                    }
-                    Err(e) => {
-                        if es_video {
-                            let _ = progress_tx
-                                .send(TransferProgress::VideoError(e.to_string()))
-                                .await;
-                        } else {
+                        Err(e) => {
                             transfer.last_event = Some(format!("Error al recibir: {}", e));
                         }
                     }
+                    recv_buffer.clear();
                 }
-                recv_buffer.clear();
             }
         }
 
@@ -361,6 +409,8 @@ async fn run_loop(
         if let Some(handle) = player_handle.as_mut() {
             if !handle.is_running() {
                 player_handle = None;
+                video_stdin = None;
+                transfer.video_streaming = false;
                 transfer.video_state = VideoState::Inactivo;
             }
         }

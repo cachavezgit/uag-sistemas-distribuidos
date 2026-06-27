@@ -76,6 +76,9 @@ pub struct PlayerHandle {
 
 impl PlayerHandle {
     /// U6: Reproduce un archivo ya reconstruido en disco.
+    /// Sin uso en main.rs desde que la recepción de video pasó a streaming en
+    /// vivo vía `open_stream()`; se mantiene como capacidad probada del módulo.
+    #[allow(dead_code)]
     pub fn play_file(path: &Path) -> Result<Self> {
         let player = Player::detect()?;
 
@@ -99,10 +102,9 @@ impl PlayerHandle {
         Ok(PlayerHandle { child, player })
     }
 
-    /// U7-ready: Abre el reproductor con stdin pipe para stream en tiempo real.
-    /// Retorna el handle y el `ChildStdin` para que network.rs escriba chunks.
-    /// Sin uso en U6 (no hay video en vivo todavía); se mantiene lista para U7.
-    #[allow(dead_code)]
+    /// Abre el reproductor con stdin pipe para streaming en tiempo real.
+    /// Retorna el handle y el `ChildStdin` para que main.rs escriba los chunks
+    /// descifrados a medida que llegan, sin esperar a tener el archivo completo.
     pub fn open_stream() -> Result<(Self, std::process::ChildStdin)> {
         let player = Player::detect()?;
 

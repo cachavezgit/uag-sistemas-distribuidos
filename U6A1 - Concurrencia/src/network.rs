@@ -9,7 +9,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -200,10 +200,6 @@ pub enum TransferProgress {
     Sending { current: u32, total: u32, file_name: String },
     Done { file_name: String },
     Error(String),
-    /// Archivo de video reconstruido y listo para reproducir
-    VideoReady(PathBuf),
-    /// El reproductor no pudo arrancar o el video no se pudo reproducir
-    VideoError(String),
 }
 
 /// Extensiones de video reconocidas para distinguir un archivo de video
@@ -287,4 +283,24 @@ pub async fn send_move(client: &TicTacToeClient, casilla: usize, clave: &str) ->
             false
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────
+// Descifra un FileChunk individual para streaming en tiempo real
+// ─────────────────────────────────────────────────────────
+/// Descifra un FileChunk individual y retorna los bytes crudos reconstruidos.
+/// Usado por main.rs para alimentar el pipe de ffplay chunk por chunk, sin
+/// esperar a tener el archivo completo (mismo pipeline que `transfer.rs`:
+/// Vigenère decrypt → Base64 decode, pero sobre un solo chunk).
+pub fn decrypt_chunk_bytes(chunk: &FileChunk, clave: &str) -> anyhow::Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let cifrado_str = String::from_utf8(chunk.data.clone())
+        .map_err(|e| anyhow::anyhow!("Chunk no es UTF-8 válido: {}", e))?;
+    let base64_str = crypto::descifrar(&cifrado_str, clave);
+    let bytes = STANDARD
+        .decode(&base64_str)
+        .map_err(|e| anyhow::anyhow!("Error Base64 decode: {}", e))?;
+
+    Ok(bytes)
 }

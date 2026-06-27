@@ -27,6 +27,10 @@ pub struct TransferState {
     pub last_event: Option<String>,
     /// Estado del panel de streaming de video
     pub video_state: VideoState,
+    /// true mientras el video se está recibiendo y reproduciendo a la vez
+    /// (pipe a ffplay todavía abierto); false una vez que ya llegó el último
+    /// chunk, aunque ffplay siga reproduciendo el buffer hasta el final.
+    pub video_streaming: bool,
 }
 
 /// Estado del panel de streaming de video (U6 A1)
@@ -36,7 +40,6 @@ pub enum VideoState {
     Inactivo,
     Explorando,
     Transmitiendo { chunk_actual: usize, total: usize },
-    Reconstruyendo,
     Reproduciendo,
     Error(String),
 }
@@ -395,16 +398,14 @@ fn render_video_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
                 inner,
             );
         }
-        VideoState::Reconstruyendo => {
-            frame.render_widget(
-                Paragraph::new("Reconstruyendo video recibido...")
-                    .style(Style::default().fg(Color::Yellow)),
-                inner,
-            );
-        }
         VideoState::Reproduciendo => {
+            let texto = if transfer.video_streaming {
+                "▶ Streaming en vivo — [Q] para detener"
+            } else {
+                "▶ Reproduciendo — [Q] para detener"
+            };
             frame.render_widget(
-                Paragraph::new("▶ Reproduciendo — [Q] para detener")
+                Paragraph::new(texto)
                     .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                 inner,
             );
