@@ -35,7 +35,7 @@ use game::{Game, GameResult};
 use network::{connect_to_peer, iniciar_log, send_file_chunks, send_move, start_server, SharedState, TransferProgress};
 use rpc::TicTacToeClient;
 use ratatui_explorer::FileExplorer;
-use ui::TransferState;
+use ui::{TransferState, VideoState};
 
 const TICK_RATE: Duration = Duration::from_millis(16);
 
@@ -137,6 +137,7 @@ async fn run_loop(
         explorer: None,
         progress: None,
         last_event: None,
+        video_state: VideoState::default(),
     };
 
     // Buffer de chunks recibidos, agrupados por nombre de archivo
@@ -243,12 +244,13 @@ async fn run_loop(
                 TransferProgress::Sending { .. } => {
                     transfer.progress = Some(prog);
                 }
-                // TODO(Tarea 3/4): reflejar en transfer.video_state y lanzar PlayerHandle
                 TransferProgress::VideoReady(path) => {
+                    transfer.video_state = VideoState::Reproduciendo;
                     transfer.last_event = Some(format!("Video listo: {}", path.display()));
+                    // TODO(Tarea 4): lanzar PlayerHandle::play_file(path) y guardar el handle
                 }
                 TransferProgress::VideoError(msg) => {
-                    transfer.last_event = Some(format!("Error de video: {}", msg));
+                    transfer.video_state = VideoState::Error(msg.clone());
                 }
             }
         }
@@ -264,6 +266,9 @@ async fn run_loop(
                 recv_buffer.sort_by_key(|c| c.chunk_index);
                 let nombre = recv_buffer[0].file_name.clone();
                 let es_video = network::is_video_file(&nombre);
+                if es_video {
+                    transfer.video_state = VideoState::Reconstruyendo;
+                }
 
                 match transfer::decrypt_and_reconstruct(&recv_buffer, clave, "./recibidos") {
                     Ok(ruta) => {

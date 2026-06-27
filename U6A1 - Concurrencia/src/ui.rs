@@ -25,6 +25,25 @@ pub struct TransferState {
     pub progress: Option<TransferProgress>,
     /// Último mensaje a mostrar cuando no hay transferencia activa
     pub last_event: Option<String>,
+    /// Estado del panel de streaming de video
+    pub video_state: VideoState,
+}
+
+/// Estado del panel de streaming de video (U6 A1)
+#[derive(Debug, Clone, PartialEq)]
+pub enum VideoState {
+    Inactivo,
+    Explorando,
+    Transmitiendo { chunk_actual: usize, total: usize },
+    Reconstruyendo,
+    Reproduciendo,
+    Error(String),
+}
+
+impl Default for VideoState {
+    fn default() -> Self {
+        VideoState::Inactivo
+    }
 }
 
 /// Colores del juego
@@ -38,12 +57,13 @@ const COLOR_DIM: Color = Color::DarkGray;
 
 /// Renderiza toda la interfaz en un frame de Ratatui
 pub fn render(frame: &mut Frame, game: &Game, transfer: &TransferState) {
-    // ── Layout principal: zona de juego arriba / panel memes abajo ──
+    // ── Layout principal: zona de juego arriba / paneles memes y video abajo ──
     let main_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),    // zona de juego
             Constraint::Length(5), // panel de memes
+            Constraint::Length(5), // panel de video
         ])
         .split(frame.area());
 
@@ -77,6 +97,9 @@ pub fn render(frame: &mut Frame, game: &Game, transfer: &TransferState) {
 
     // ── Panel inferior: transferencia de memes ──
     render_memes_panel(frame, main_rows[1], transfer);
+
+    // ── Panel inferior: streaming de video ──
+    render_video_panel(frame, main_rows[2], transfer);
 
     // ── Overlay del explorador de archivos (encima de todo) ──
     if let Some(explorer) = &transfer.explorer {
@@ -320,6 +343,84 @@ fn render_memes_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
         Paragraph::new(msg).style(Style::default().fg(COLOR_DIM)),
         inner,
     );
+}
+
+// ─────────────────────────────────────────────────────────
+// Panel inferior de streaming de video
+// ─────────────────────────────────────────────────────────
+fn render_video_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
+    let border_color = match &transfer.video_state {
+        VideoState::Error(_) => Color::Red,
+        VideoState::Reproduciendo => Color::Green,
+        _ => Color::Blue,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" VIDEO — Streaming P2P ")
+        .title_alignment(Alignment::Center)
+        .style(Style::default().fg(border_color));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    match &transfer.video_state {
+        VideoState::Transmitiendo { chunk_actual, total } => {
+            let ratio = if *total > 0 { *chunk_actual as f64 / *total as f64 } else { 0.0 };
+            let label = format!("Enviando video...  {}/{} chunks", chunk_actual, total);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Length(1)])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(label).style(Style::default().fg(Color::Cyan)),
+                layout[0],
+            );
+            frame.render_widget(
+                Gauge::default()
+                    .ratio(ratio)
+                    .style(Style::default().fg(Color::Cyan))
+                    .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray)),
+                layout[1],
+            );
+        }
+        VideoState::Inactivo => {
+            frame.render_widget(
+                Paragraph::new("[V] Enviar video — abre el explorador de archivos")
+                    .style(Style::default().fg(COLOR_DIM)),
+                inner,
+            );
+        }
+        VideoState::Explorando => {
+            frame.render_widget(
+                Paragraph::new("Selecciona un video en el explorador (Enter = enviar, Esc = cancelar)")
+                    .style(Style::default().fg(COLOR_DIM)),
+                inner,
+            );
+        }
+        VideoState::Reconstruyendo => {
+            frame.render_widget(
+                Paragraph::new("Reconstruyendo video recibido...")
+                    .style(Style::default().fg(Color::Yellow)),
+                inner,
+            );
+        }
+        VideoState::Reproduciendo => {
+            frame.render_widget(
+                Paragraph::new("▶ Reproduciendo — [Q] para detener")
+                    .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                inner,
+            );
+        }
+        VideoState::Error(msg) => {
+            frame.render_widget(
+                Paragraph::new(format!("✗ Error: {}", msg)).style(Style::default().fg(Color::Red)),
+                inner,
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────
