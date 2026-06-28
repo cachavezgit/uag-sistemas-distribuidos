@@ -497,8 +497,8 @@ fn parse_args(args: &[String]) -> (u8, u16, String, String) {
 
     println!("╔══════════════════════════════════════════╗");
     println!("║   Juego del Gato — P2P con RPC (tarpc)   ║");
-    println!("║   Jugador {}  |  Puerto: {}              ║", my_player, listen_port);
-    println!("║   Rival en: {}                  ║", rival_addr);
+    println!("║   Jugador {}  |  Puerto: {}             ║", my_player, listen_port);
+    println!("║   Rival en: {}         ║", rival_addr);
     println!("║   Cifrado Vigenère activo                ║");
     println!("╚══════════════════════════════════════════╝\n");
 
