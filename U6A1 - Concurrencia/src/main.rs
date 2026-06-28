@@ -229,8 +229,10 @@ async fn run_loop(
                             if let Some(mut handle) = player_handle.take() {
                                 if video_stdin.is_some() {
                                     // Todavía había pipe abierto: quedan chunks de este
-                                    // video en camino, hay que ignorarlos en silencio.
+                                    // video en camino, hay que ignorarlos en silencio
+                                    // mientras le avisamos al emisor que se detenga.
                                     video_cancelado = true;
+                                    state.set_video_cancel(true);
                                 }
                                 video_stdin = None; // cerrar el pipe antes de matar el proceso
                                 transfer.video_streaming = false;
@@ -335,7 +337,10 @@ async fn run_loop(
 
                 // ── Streaming en vivo: descifrar y escribir al pipe de inmediato ──
                 if video_stdin.is_none() {
-                    // Primer chunk de este video: abrir el reproductor con stdin pipe
+                    // Primer chunk de este video: abrir el reproductor con stdin pipe.
+                    // Limpiar la cancelación de una transmisión anterior para que el
+                    // emisor pueda mandar este video nuevo sin que se rechace de entrada.
+                    state.set_video_cancel(false);
                     match PlayerHandle::open_stream() {
                         Ok((handle, stdin)) => {
                             transfer.video_state = VideoState::Reproduciendo;

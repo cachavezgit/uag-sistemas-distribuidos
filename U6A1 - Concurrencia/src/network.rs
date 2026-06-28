@@ -53,6 +53,12 @@ pub struct SharedState {
     pub clave: Arc<String>,
     /// Canal para encolar los chunks de archivo recibidos
     pub chunk_tx: mpsc::Sender<FileChunk>,
+    /// true mientras el usuario local canceló con [Q] la recepción/reproducción
+    /// de un video en curso. El servidor RPC lo consulta en `send_chunk` para
+    /// rechazar (ChunkAck.ok = false) los chunks restantes y así avisarle al
+    /// emisor que debe detener la transmisión, en vez de seguir mandando un
+    /// video que ya nadie va a reproducir.
+    pub video_cancel: Arc<Mutex<bool>>,
 }
 
 impl SharedState {
@@ -62,6 +68,7 @@ impl SharedState {
             rival_disconnected: Arc::new(Mutex::new(false)),
             clave: Arc::new(clave),
             chunk_tx,
+            video_cancel: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -72,6 +79,12 @@ impl SharedState {
 
     pub fn is_rival_disconnected(&self) -> bool {
         *self.rival_disconnected.lock().unwrap()
+    }
+
+    /// Marca/desmarca la cancelación de video para que `send_chunk` rechace
+    /// (o vuelva a aceptar) los chunks de video entrantes.
+    pub fn set_video_cancel(&self, value: bool) {
+        *self.video_cancel.lock().unwrap() = value;
     }
 }
 
@@ -123,6 +136,14 @@ impl TicTacToe for TicTacToeServer {
     /// Recibe un chunk de archivo del peer rival y lo encola para reconstrucción.
     async fn send_chunk(self, _: context::Context, chunk: FileChunk) -> ChunkAck {
         let idx = chunk.chunk_index;
+
+        // El receptor canceló la reproducción del video con [Q]: rechazar este
+        // chunk (y los siguientes) para que el emisor detenga la transmisión
+        // en vez de seguir mandando un video que ya nadie va a ver.
+        if is_video_file(&chunk.file_name) && *self.state.video_cancel.lock().unwrap() {
+            return ChunkAck { chunk_index: idx, ok: false };
+        }
+
         if let Err(e) = self.state.chunk_tx.send(chunk).await {
             eprintln!("[RPC] Error encolando chunk {}: {}", idx, e);
             return ChunkAck { chunk_index: idx, ok: false };
@@ -241,7 +262,11 @@ pub async fn send_file_chunks(
         match client.send_chunk(context::current(), chunk).await {
             Ok(ack) if ack.ok => {}
             Ok(ack) => {
-                let msg = format!("Chunk {} rechazado por el receptor", ack.chunk_index);
+                let msg = if is_video_file(&file_name) {
+                    "Transmisión detenida: el receptor canceló la reproducción".to_string()
+                } else {
+                    format!("Chunk {} rechazado por el receptor", ack.chunk_index)
+                };
                 let _ = progress_tx.send(TransferProgress::Error(msg.clone())).await;
                 return Err(anyhow::anyhow!(msg));
             }
