@@ -28,9 +28,11 @@ pub struct TransferState {
     /// Estado del panel de streaming de video
     pub video_state: VideoState,
     /// true mientras el video se está recibiendo y reproduciendo a la vez
-    /// (pipe a ffplay todavía abierto); false una vez que ya llegó el último
-    /// chunk, aunque ffplay siga reproduciendo el buffer hasta el final.
+    /// (pipe a mpv/ffplay todavía abierto); false una vez que ya llegó el último
+    /// chunk, aunque el reproductor siga procesando el buffer hasta el final.
     pub video_streaming: bool,
+    /// true si el reproductor activo es mpv con IPC habilitado (controles disponibles)
+    pub video_has_ipc: bool,
 }
 
 /// Estado del panel de streaming de video (U6 A1)
@@ -88,7 +90,7 @@ pub fn render(frame: &mut Frame, game: &Game, transfer: &TransferState) {
     render_title(frame, areas[0], game);
     render_board(frame, areas[1], game);
     render_status(frame, areas[2], game);
-    render_help(frame, areas[3]);
+    render_help(frame, areas[3], transfer);
 
     // ── Columna derecha: panel Historia ──
     render_history_panel(frame, columns[1], game);
@@ -223,8 +225,18 @@ fn render_status(frame: &mut Frame, area: Rect, game: &Game) {
 // ─────────────────────────────────────────────────────────
 // Panel de controles
 // ─────────────────────────────────────────────────────────
-fn render_help(frame: &mut Frame, area: Rect) {
-    let help = Paragraph::new("  1-9: elegir casilla   |   R: reiniciar   |   M: enviar meme   |   Q: salir")
+fn render_help(frame: &mut Frame, area: Rect, transfer: &TransferState) {
+    let text = if matches!(transfer.video_state, VideoState::Reproduciendo) {
+        if transfer.video_has_ipc {
+            "  [Espacio] pausa/resume  |  [←/→] seek ±10s  |  [R] reiniciar  |  [Q] detener video"
+        } else {
+            "  [Q] detener video  (instala mpv para controles interactivos)"
+        }
+    } else {
+        "  1-9: elegir casilla   |   R: reiniciar   |   M: enviar meme   |   V: enviar video   |   Q: salir"
+    };
+
+    let help = Paragraph::new(text)
         .style(Style::default().fg(COLOR_DIM))
         .block(Block::default().borders(Borders::ALL).title(" Controles "))
         .alignment(Alignment::Center);
@@ -399,10 +411,16 @@ fn render_video_panel(frame: &mut Frame, area: Rect, transfer: &TransferState) {
             );
         }
         VideoState::Reproduciendo => {
-            let texto = if transfer.video_streaming {
-                "▶ Streaming en vivo — [Q] para detener"
+            let texto = if transfer.video_has_ipc {
+                if transfer.video_streaming {
+                    "▶ Streaming en vivo — [Espacio] pausa  [←/→] seek ±10s  [R] reinicio  [Q] detener"
+                } else {
+                    "▶ Reproduciendo — [Espacio] pausa  [←/→] seek ±10s  [R] reinicio  [Q] detener"
+                }
+            } else if transfer.video_streaming {
+                "▶ Streaming en vivo (sin controles — instala mpv para playback interactivo)  [Q] detener"
             } else {
-                "▶ Reproduciendo — [Q] para detener"
+                "▶ Reproduciendo (sin controles — instala mpv para playback interactivo)  [Q] detener"
             };
             frame.render_widget(
                 Paragraph::new(texto)

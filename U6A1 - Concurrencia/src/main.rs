@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 
 use game::{Game, GameResult};
 use network::{connect_to_peer, iniciar_log, send_file_chunks, send_move, start_server, SharedState, TransferProgress};
-use player::PlayerHandle;
+use player::{PlayerHandle, PlaybackCommand};
 use rpc::TicTacToeClient;
 use ratatui_explorer::FileExplorer;
 use ui::{TransferState, VideoState};
@@ -139,6 +139,7 @@ async fn run_loop(
         last_event: None,
         video_state: VideoState::default(),
         video_streaming: false,
+        video_has_ipc: false,
     };
 
     // Buffer de chunks recibidos, agrupados por nombre de archivo (solo memes —
@@ -236,6 +237,7 @@ async fn run_loop(
                                 }
                                 video_stdin = None; // cerrar el pipe antes de matar el proceso
                                 transfer.video_streaming = false;
+                                transfer.video_has_ipc = false;
                                 let _ = handle.stop();
                                 transfer.video_state = VideoState::Inactivo;
                             } else {
@@ -243,8 +245,28 @@ async fn run_loop(
                             }
                         }
 
+                        KeyCode::Char(' ') => {
+                            if let Some(ref handle) = player_handle {
+                                let _ = handle.send_command(PlaybackCommand::TogglePause);
+                            }
+                        }
+
+                        KeyCode::Right => {
+                            if let Some(ref handle) = player_handle {
+                                let _ = handle.send_command(PlaybackCommand::SeekForward);
+                            }
+                        }
+
+                        KeyCode::Left => {
+                            if let Some(ref handle) = player_handle {
+                                let _ = handle.send_command(PlaybackCommand::SeekBackward);
+                            }
+                        }
+
                         KeyCode::Char('r') | KeyCode::Char('R') => {
-                            if game.result != GameResult::Ongoing {
+                            if let Some(ref handle) = player_handle {
+                                let _ = handle.send_command(PlaybackCommand::Restart);
+                            } else if game.result != GameResult::Ongoing {
                                 game.reset();
                             }
                         }
@@ -345,6 +367,7 @@ async fn run_loop(
                         Ok((handle, stdin)) => {
                             transfer.video_state = VideoState::Reproduciendo;
                             transfer.video_streaming = true;
+                            transfer.video_has_ipc = handle.player.supports_ipc_control();
                             player_handle = Some(handle);
                             video_stdin = Some(stdin);
                         }
@@ -408,12 +431,13 @@ async fn run_loop(
             }
         }
 
-        // ── El reproductor terminó por su cuenta (ffplay -autoexit al acabar el video) ──
+        // ── El reproductor terminó por su cuenta (mpv/ffplay -autoexit al acabar el video) ──
         if let Some(handle) = player_handle.as_mut() {
             if !handle.is_running() {
                 player_handle = None;
                 video_stdin = None;
                 transfer.video_streaming = false;
+                transfer.video_has_ipc = false;
                 transfer.video_state = VideoState::Inactivo;
             }
         }
