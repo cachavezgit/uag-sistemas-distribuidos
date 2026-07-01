@@ -412,7 +412,131 @@ cargo test round_trip_archivo_50mb -- --nocapture
 
 ---
 
+### U6A1 — Juego del Gato P2P con Streaming de Video en Tiempo Real (Rust)
+
+Extensión de U5A1 que añade streaming de video P2P en tiempo real. En vez de reconstruir el archivo en disco para luego reproducirlo, cada chunk de video se descifra y se escribe directamente al `stdin` del reproductor (`mpv` o `ffplay`) conforme llega, de modo que la reproducción comienza desde el primer chunk recibido sin esperar a que termine la transmisión.
+
+**Ubicación:** `U6A1 - Concurrencia/`
+
+#### Arquitectura
+
+Sobre la misma base P2P de U5A1 (autenticación, cifrado Vigenère, TUI Ratatui, transferencia por chunks) se añaden el pipeline de streaming y el protocolo de cancelación:
+
+```
+[V] abre FileExplorer
+  └─► fragment_and_encrypt(video, clave)
+        └─► send_file_chunks(client, chunks, progress_tx)
+              └─► client.send_chunk(chunk) → ChunkAck      [por cada chunk]
+                    └─► ChunkAck.ok = false → detener  ←  receptor canceló con [Q]
+
+[chunk_rx]  ←  TicTacToeServer::send_chunk (RPC entrante)
+  ├─► is_video_file() → sí:
+  │     ├─► 1er chunk: PlayerHandle::open_stream() → (handle, ChildStdin)
+  │     ├─► siguientes: decrypt_chunk_bytes(chunk, clave) → stdin.write_all(bytes)
+  │     └─► último chunk: cierra pipe → reproductor termina al vaciar su buffer
+  └─► is_video_file() → no: recv_buffer → decrypt_and_reconstruct → ./recibidos/
+```
+
+#### Módulos
+
+| Archivo | Descripción |
+|---|---|
+| `src/player.rs` | **Nuevo.** `enum Player { MpvIpc(bin, socket), Ffplay(bin) }` con `detect()` que prioriza mpv sobre ffplay. `PlayerHandle` con `open_stream()` (pipe de `stdin` para streaming), `stop()`, `is_running()` y `Drop` que mata el proceso hijo. `PlaybackCommand` (`TogglePause`, `SeekForward`, `SeekBackward`, `Restart`) con `to_json()` para el protocolo IPC de mpv. `try_send_ipc()` conecta al socket Unix de mpv con hasta 10 reintentos. 6 tests unitarios. |
+| `src/network.rs` | Añade `is_video_file()` (detecta `.mp4 .mkv .avi .mov .webm .mpg .mpeg`), `decrypt_chunk_bytes()` (descifra un chunk individual para streaming en tiempo real), campo `video_cancel: Arc<Mutex<bool>>` en `SharedState` y `set_video_cancel()`. `TicTacToeServer::send_chunk` consulta `video_cancel` y retorna `ChunkAck { ok: false }` para cortar la transmisión cuando el receptor cancela. |
+| `src/ui.rs` | `enum VideoState { Inactivo, Explorando, Transmitiendo { chunk_actual, total }, Reproduciendo, Error(String) }`. Panel " VIDEO — Streaming P2P " separado debajo del panel de memes. Panel de controles se adapta dinámicamente: muestra atajos de IPC (`Espacio`, `←/→`, `R`) cuando mpv está activo, o avisa que hay que instalar mpv si el reproductor es ffplay. |
+| `src/main.rs` | Tecla `[V]` abre el explorador en modo video. Primer chunk entrante abre `PlayerHandle::open_stream()`; siguientes se escriben al `ChildStdin`; último cierra el pipe. Flag local `video_cancelado` descarta en silencio chunks que ya estaban en el canal `mpsc` antes de que el rechazo RPC surtiera efecto. Tecla `[Q]` con reproductor activo lo detiene y llama `state.set_video_cancel(true)`. |
+| `src/auth.rs` | Sin cambios respecto a U5A1. |
+| `src/crypto.rs` | Sin cambios respecto a U5A1. |
+| `src/game.rs` | Sin cambios respecto a U5A1. |
+| `src/transfer.rs` | Sin cambios respecto a U5A1. |
+| `src/rpc.rs` | Sin cambios respecto a U5A1. |
+
+#### Cómo ejecutar
+
+```bash
+cd "U6A1 - Concurrencia"
+
+# Terminal 1 — Jugador 1
+cargo run -- --jugador 1 --escucha 8001 --rival 127.0.0.1:8002 --clave misecreta
+
+# Terminal 2 — Jugador 2
+cargo run -- --jugador 2 --escucha 8002 --rival 127.0.0.1:8001 --clave misecreta
+
+# Opcional: ver payloads cifrados en tiempo real
+tail -f crypto.log
+```
+
+Ambos jugadores deben usar la misma `--clave`. Si se omite, el valor por defecto es `clave_defecto`.
+
+#### Controles
+
+| Tecla | Acción |
+|---|---|
+| `1` – `9` | Seleccionar casilla del tablero |
+| `M` | Abrir explorador de archivos para enviar un meme/archivo al rival |
+| `V` | Abrir explorador de archivos para enviar un video al rival (streaming en tiempo real) |
+| `Esc` | Cerrar el explorador sin enviar |
+| `Enter` | Confirmar archivo seleccionado e iniciar transferencia |
+| `Espacio` | Pausar/reanudar video (solo con mpv) |
+| `→` / `←` | Avanzar/retroceder ±10 segundos (solo con mpv) |
+| `R` | Reiniciar video desde el inicio (solo con mpv) / reiniciar partida al terminar |
+| `Q` | Detener reproducción de video (si hay una activa) / salir del juego |
+
+#### Pipeline de streaming en tiempo real
+
+```
+Emisor:    bytes → Base64 → Vigenère cifrado → chunks → RPC send_chunk
+Receptor:  chunk → Vigenère descifrado → Base64 decode → stdin.write_all(mpv/ffplay)
+```
+
+El video empieza a reproducirse desde el **primer chunk recibido**, sin esperar a que llegue el archivo completo. El emisor fragmenta y cifra con el mismo pipeline que en U5A1; el receptor omite la reconstrucción en disco y alimenta los bytes directamente al pipe `stdin` del reproductor.
+
+Para evitar que `stdin.write_all()` (bloqueante cuando el pipe se llena) impida leer eventos de teclado, el loop principal procesa **un solo chunk de video por iteración** (~16 ms), dejando el resto en el buffer del canal `mpsc`.
+
+#### Protocolo de cancelación (receptor → emisor)
+
+Cuando el receptor presiona `[Q]` mientras un video se está transmitiendo:
+
+1. El reproductor local se detiene y el pipe `stdin` se cierra.
+2. `state.set_video_cancel(true)` activa el flag en `SharedState`.
+3. El siguiente `send_chunk` RPC del emisor encuentra `video_cancel = true` y retorna `ChunkAck { ok: false }`.
+4. `send_file_chunks` en el emisor detecta `ok: false` y detiene la transmisión.
+5. El flag se resetea a `false` cuando comienza la siguiente transmisión de video.
+
+Un flag local `video_cancelado` descarta en silencio los chunks que ya estaban en el canal antes de que el rechazo RPC surtiera efecto.
+
+#### Tests unitarios (`src/player.rs`)
+
+| Test | Descripción |
+|---|---|
+| `detect_prioriza_mpv_sobre_ffplay` | Verifica que mpv se detecta y se prioriza sobre ffplay. |
+| `find_binary_retorna_ruta_valida` | La ruta retornada por `find_binary` existe en disco. |
+| `find_binary_binario_inexistente_retorna_none` | Retorna `None` para binarios no instalados. |
+| `play_file_archivo_inexistente_no_panics` | `play_file()` sobre una ruta inexistente no entra en pánico. |
+| `send_command_a_socket_inexistente_retorna_err` | `try_send_ipc` retorna error cuando el socket no existe. |
+| `playback_command_genera_json_valido` | Cada variante de `PlaybackCommand` genera el JSON IPC correcto. |
+
+**Cómo ejecutar los tests:**
+
+```bash
+cd "U6A1 - Concurrencia"
+
+# Todos los tests (player.rs + transfer.rs + crypto.rs)
+cargo test
+
+# Solo los tests de player.rs
+cargo test -- player::
+
+# Un test específico
+cargo test playback_command_genera_json_valido -- --nocapture
+```
+
+---
+
 ## Requisitos
 
 - Python 3.x (sin dependencias externas, solo biblioteca estándar)
-- Rust + Cargo (para las actividades U2A1, U3A1, U4A1 y U5A1)
+- Rust + Cargo (para las actividades U2A1 en adelante)
+- `mpv` (recomendado) o `ffplay` para reproducción de video en U6A1
+  - macOS: `brew install mpv`
+  - Linux: `sudo apt install mpv -y`
