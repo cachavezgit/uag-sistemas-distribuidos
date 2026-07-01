@@ -519,12 +519,18 @@ fn parse_args(args: &[String]) -> (u8, u16, String, String) {
         i += 1;
     }
 
-    println!("╔══════════════════════════════════════════╗");
-    println!("║   Juego del Gato — P2P con RPC (tarpc)   ║");
-    println!("║   Jugador {}  |  Puerto: {}             ║", my_player, listen_port);
-    println!("║   Rival en: {}          ║", rival_addr);
-    println!("║   Cifrado Vigenère activo                ║");
-    println!("╚══════════════════════════════════════════╝\n");
+    let w = 42usize;
+    let row = |s: String| {
+        let len = s.chars().count();
+        let pad = w.saturating_sub(len);
+        format!("║{}{}║", s, " ".repeat(pad))
+    };
+    println!("╔{}╗", "═".repeat(w));
+    println!("{}", row(format!("   Juego del Gato — P2P con RPC (tarpc)   ")));
+    println!("{}", row(format!("   Jugador {}  |  Puerto: {}", my_player, listen_port)));
+    println!("{}", row(format!("   Rival en: {}", rival_addr)));
+    println!("{}", row(format!("   Cifrado Vigenère activo")));
+    println!("╚{}╝\n", "═".repeat(w));
 
     (my_player, listen_port, rival_addr, clave)
 }
