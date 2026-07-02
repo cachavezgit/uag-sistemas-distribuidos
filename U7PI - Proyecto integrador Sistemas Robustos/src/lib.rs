@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod crypto;
+pub mod emoji;
 pub mod game;
 pub mod player;
 pub mod proto;
