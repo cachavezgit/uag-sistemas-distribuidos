@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "gato-p2p"
-path = "src/main.rs"
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
 
 [dependencies]
 # RPC framework de Google para Rust
@@ -28,3 +32,8 @@ futures = "0.3"
 anyhow = "1.0"
 base64 = "0.22"
 ratatui-explorer = "0.2"
+
+# Videollamada: captura de cámara + codificación de frames
+nokhwa = { version = "0.10", features = ["input-native"] }
+image = "0.25"
+tokio-util = { version = "0.7", features = ["codec"] }
