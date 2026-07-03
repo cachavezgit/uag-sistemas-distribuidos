@@ -6,6 +6,36 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gato_p2p::proto::{GroupInfo, NodeInfo};
+use gato_p2p::transfer::FileChunk;
+
+/// Eventos que el `PeerService` propio (ver `client/peer.rs`) empuja hacia
+/// el loop principal de la TUI a través de un canal `mpsc`. Se declaran
+/// todas las variantes desde el commit 4 aunque el loop todavía solo
+/// consuma `DirectMessage`/`DirectoryUpdated` — así los commits
+/// siguientes (archivos, gato, grupos, video) solo agregan un `match`
+/// arm nuevo en `client.rs` en vez de tocar `peer.rs` cada vez.
+pub enum ClientEvent {
+    DirectMessage { from: String, content: String },
+    #[allow(dead_code)] // consumido a partir del commit de grupos
+    GroupMessage { from: String, group: String, content: String },
+    #[allow(dead_code)] // consumido a partir del commit de transferencia de archivos
+    FileChunkReceived(FileChunk),
+    #[allow(dead_code)] // consumido a partir del commit de videollamada
+    VideoFrame { from: String, jpeg: Vec<u8> },
+    #[allow(dead_code)] // consumido a partir del commit de gato embebido
+    GameMove { from: String, position: u8 },
+    #[allow(dead_code)]
+    GameInvite { from: String },
+    #[allow(dead_code)]
+    GameAccept { from: String },
+    DirectoryUpdated(Vec<NodeInfo>),
+    #[allow(dead_code)] // consumido a partir del commit de grupos
+    GroupsUpdated(Vec<GroupInfo>),
+    #[allow(dead_code)] // consumido a partir del commit de videollamada
+    VideoCallRequest { from: String },
+    #[allow(dead_code)]
+    VideoCallAccepted { from: String },
+}
 
 pub struct AppState {
     pub my_info: NodeInfo,
@@ -133,16 +163,21 @@ impl AppState {
         };
     }
 
-    /// Agrega un mensaje al historial del chat seleccionado (echo local).
-    /// El envío real por RPC se conecta en el commit 4.
-    pub fn push_local_message(&mut self, content: String) {
-        let Some(target) = self.selected_contact.clone() else { return };
-        let content = gato_p2p::emoji::procesar(&content);
+    /// Agrega un mensaje al historial de `target` (propio o recibido de un
+    /// peer). El envío/recepción real por RPC vive en `client.rs`/`peer.rs`;
+    /// esto solo actualiza el estado ya procesado.
+    pub fn record_message(&mut self, target: String, from: String, content: String) {
         self.chats.entry(target).or_default().push(ChatMessage {
-            from: self.my_info.username.clone(),
+            from,
             content,
             timestamp: timestamp_now(),
         });
+    }
+
+    /// Nodo del directorio para un username dado (para resolver ip:puerto
+    /// antes de una llamada P2P directa).
+    pub fn find_node(&self, username: &str) -> Option<&NodeInfo> {
+        self.directory.iter().find(|n| n.username == username)
     }
 }
 

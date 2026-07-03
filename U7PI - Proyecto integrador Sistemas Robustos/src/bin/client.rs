@@ -1,15 +1,16 @@
 // ─────────────────────────────────────────────────────────
 // bin/client.rs — Cliente de chat P2P (entry point)
 //
-// Etapa 3 (TUI skeleton): autentica, se registra en el servidor de
-// descubrimiento y lanza la TUI con el layout WhatsApp. La navegación
-// y el envío de mensajes son locales todavía (echo en el historial);
-// el listener PeerService propio, el push en tiempo real y el envío
-// P2P real se conectan en el commit 4.
+// Etapa 4: levanta el PeerService propio ANTES de registrarse (así el
+// servidor puede conectarse de vuelta para el push, ver proto.rs),
+// se registra, y corre la TUI con directorio en tiempo real y chat
+// individual P2P real (send_message).
 // ─────────────────────────────────────────────────────────
 
 #[path = "client/app.rs"]
 mod app;
+#[path = "client/peer.rs"]
+mod peer;
 #[path = "client/ui.rs"]
 mod ui;
 
@@ -24,8 +25,9 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tarpc::{client, context, tokio_serde::formats::Json};
+use tokio::sync::mpsc;
 
-use app::{AppState, Focus};
+use app::{AppState, ClientEvent, Focus};
 use gato_p2p::proto::{NodeInfo, RegistryServiceClient};
 
 const SERVER_ADDR: &str = "127.0.0.1:9000";
@@ -90,6 +92,13 @@ fn main() {
 }
 
 async fn iniciar(args: Args) -> anyhow::Result<()> {
+    let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(256);
+
+    // El listener PeerService propio debe estar arriba ANTES de registrarse:
+    // el servidor de descubrimiento se conecta de vuelta a este puerto para
+    // empujar notify_directory apenas nos registremos.
+    let my_port = peer::start_listener(event_tx).await?;
+
     let transport = tarpc::serde_transport::tcp::connect(SERVER_ADDR, Json::default).await?;
     let registry = RegistryServiceClient::new(client::Config::default(), transport).spawn();
 
@@ -97,7 +106,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
         username: args.nombre.clone(),
         emoji: args.emoji.clone(),
         ip: "127.0.0.1".to_string(),
-        port: 0, // el listener PeerService propio se agrega en el commit 4
+        port: my_port,
     };
 
     let directorio = registry
@@ -114,7 +123,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal, &mut app).await;
+    let result = run_loop(&mut terminal, &mut app, event_rx).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -131,6 +140,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
+    mut event_rx: mpsc::Receiver<ClientEvent>,
 ) -> anyhow::Result<()> {
     let mut last_tick = Instant::now();
 
@@ -147,12 +157,35 @@ async fn run_loop(
             }
         }
 
+        while let Ok(event) = event_rx.try_recv() {
+            handle_client_event(app, event);
+        }
+
         if last_tick.elapsed() >= TICK_RATE {
             last_tick = Instant::now();
         }
     }
 
     Ok(())
+}
+
+/// Aplica un evento recibido del PeerService propio (mensajes P2P, push
+/// del directorio, etc.) al estado de la TUI.
+fn handle_client_event(app: &mut AppState, event: ClientEvent) {
+    match event {
+        ClientEvent::DirectMessage { from, content } => {
+            app.record_message(from.clone(), from, content);
+        }
+        ClientEvent::GroupMessage { from, group, content } => {
+            app.record_message(group, from, content);
+        }
+        ClientEvent::DirectoryUpdated(nodes) => {
+            app.directory = nodes;
+        }
+        // El resto de variantes se maneja a partir de sus commits
+        // correspondientes (archivos, gato, grupos, video).
+        _ => {}
+    }
 }
 
 fn handle_key(app: &mut AppState, code: KeyCode) {
@@ -168,17 +201,39 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
         Focus::Input => match code {
             KeyCode::Tab => app.toggle_focus(),
             KeyCode::Esc => app.input_buffer.clear(),
-            KeyCode::Enter => {
-                if !app.input_buffer.trim().is_empty() {
-                    let content = std::mem::take(&mut app.input_buffer);
-                    app.push_local_message(content);
-                }
-            }
+            KeyCode::Enter => submit_message(app),
             KeyCode::Backspace => {
                 app.input_buffer.pop();
             }
             KeyCode::Char(c) => app.input_buffer.push(c),
             _ => {}
         },
+    }
+}
+
+/// Procesa el buffer de entrada (traduce `/e `), lo agrega al historial
+/// local y lo envía por P2P real al contacto seleccionado. El envío
+/// grupal (fan-out a cada miembro) se conecta en el commit de grupos.
+fn submit_message(app: &mut AppState) {
+    if app.input_buffer.trim().is_empty() {
+        return;
+    }
+    let raw = std::mem::take(&mut app.input_buffer);
+    let content = gato_p2p::emoji::procesar(&raw);
+
+    let Some(target) = app.selected_contact.clone() else { return };
+    app.record_message(target.clone(), app.my_info.username.clone(), content.clone());
+
+    if app.is_group(&target) {
+        return; // fan-out a miembros: commit de grupos
+    }
+
+    if let Some(node) = app.find_node(&target) {
+        let ip = node.ip.clone();
+        let port = node.port;
+        let from = app.my_info.username.clone();
+        tokio::spawn(async move {
+            let _ = peer::send_message_to(&ip, port, from, content).await;
+        });
     }
 }

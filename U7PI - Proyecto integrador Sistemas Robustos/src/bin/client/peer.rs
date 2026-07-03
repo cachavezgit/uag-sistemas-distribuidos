@@ -1,0 +1,133 @@
+// ─────────────────────────────────────────────────────────
+// client/peer.rs — PeerService propio del cliente
+//
+// Cada cliente levanta su propio servidor tarpc (PeerService) para
+// recibir tanto llamadas P2P directas de otros clientes (mensajes,
+// archivos, gato, video) como el push de vuelta del servidor de
+// descubrimiento (notify_*, ver nota de diseño en proto.rs). Cada
+// handler simplemente empuja un ClientEvent al canal que consume el
+// loop principal de la TUI.
+// ─────────────────────────────────────────────────────────
+
+use futures::prelude::*;
+use tarpc::{
+    client, context,
+    server::{self, Channel},
+    tokio_serde::formats::Json,
+};
+use tokio::sync::mpsc;
+
+use gato_p2p::proto::{GroupInfo, NodeInfo, PeerService, PeerServiceClient};
+use gato_p2p::transfer::FileChunk;
+
+use super::app::ClientEvent;
+
+#[derive(Clone)]
+pub struct PeerServer {
+    pub events: mpsc::Sender<ClientEvent>,
+}
+
+impl PeerServer {
+    async fn emit(&self, event: ClientEvent) -> Result<(), String> {
+        self.events
+            .send(event)
+            .await
+            .map_err(|e| format!("canal de eventos cerrado: {}", e))
+    }
+}
+
+impl PeerService for PeerServer {
+    async fn send_message(self, _: context::Context, from: String, content: String) -> Result<(), String> {
+        self.emit(ClientEvent::DirectMessage { from, content }).await
+    }
+
+    async fn send_group_message(
+        self,
+        _: context::Context,
+        from: String,
+        group: String,
+        content: String,
+    ) -> Result<(), String> {
+        self.emit(ClientEvent::GroupMessage { from, group, content }).await
+    }
+
+    async fn send_file_chunk(self, _: context::Context, _from: String, chunk: FileChunk) -> Result<(), String> {
+        self.emit(ClientEvent::FileChunkReceived(chunk)).await
+    }
+
+    async fn send_video_frame(self, _: context::Context, from: String, jpeg_data: Vec<u8>) -> Result<(), String> {
+        self.emit(ClientEvent::VideoFrame { from, jpeg: jpeg_data }).await
+    }
+
+    async fn game_move(self, _: context::Context, from: String, position: u8) -> Result<(), String> {
+        self.emit(ClientEvent::GameMove { from, position }).await
+    }
+
+    async fn game_invite(self, _: context::Context, from: String) -> Result<(), String> {
+        self.emit(ClientEvent::GameInvite { from }).await
+    }
+
+    async fn game_accept(self, _: context::Context, from: String) -> Result<(), String> {
+        self.emit(ClientEvent::GameAccept { from }).await
+    }
+
+    async fn notify_directory(self, _: context::Context, nodes: Vec<NodeInfo>) -> Result<(), String> {
+        self.emit(ClientEvent::DirectoryUpdated(nodes)).await
+    }
+
+    async fn notify_groups(self, _: context::Context, groups: Vec<GroupInfo>) -> Result<(), String> {
+        self.emit(ClientEvent::GroupsUpdated(groups)).await
+    }
+
+    async fn notify_video_call_request(self, _: context::Context, from: String) -> Result<(), String> {
+        self.emit(ClientEvent::VideoCallRequest { from }).await
+    }
+
+    async fn notify_video_call_accepted(self, _: context::Context, from: String) -> Result<(), String> {
+        self.emit(ClientEvent::VideoCallAccepted { from }).await
+    }
+}
+
+/// Bindea un puerto local libre, levanta el listener PeerService en
+/// background y retorna el puerto asignado por el SO. Debe llamarse
+/// ANTES de registrarse en el servidor de descubrimiento, para que este
+/// pueda conectarse de vuelta (push) apenas nos registre.
+pub async fn start_listener(events: mpsc::Sender<ClientEvent>) -> anyhow::Result<u16> {
+    let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:0", Json::default).await?;
+    listener.config_mut().max_frame_length(usize::MAX);
+    let port = listener.local_addr().port();
+
+    tokio::spawn(async move {
+        // Cada canal en su propia tarea (ver comentario equivalente en
+        // bin/server.rs): de lo contrario solo el primer peer que nos
+        // contacte sería atendido, y toda conexión posterior (otro mensaje,
+        // otro peer, el push del servidor) se quedaría esperando para
+        // siempre en el backlog de TCP.
+        listener
+            .filter_map(|r| future::ready(r.ok()))
+            .map(server::BaseChannel::with_defaults)
+            .for_each(|channel| {
+                let server = PeerServer { events: events.clone() };
+                tokio::spawn(channel.execute(server.serve()).for_each(|response| async move {
+                    tokio::spawn(response);
+                }));
+                future::ready(())
+            })
+            .await;
+    });
+
+    Ok(port)
+}
+
+/// Dial efímero al PeerService de otro nodo para enviarle un mensaje
+/// directo. Se conecta por mensaje en vez de cachear la conexión — más
+/// simple y suficientemente rápido para la cadencia de un chat.
+pub async fn send_message_to(ip: &str, port: u16, from: String, content: String) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", ip, port);
+    let transport = tarpc::serde_transport::tcp::connect(&addr, Json::default).await?;
+    let client = PeerServiceClient::new(client::Config::default(), transport).spawn();
+    client
+        .send_message(context::current(), from, content)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
+}
