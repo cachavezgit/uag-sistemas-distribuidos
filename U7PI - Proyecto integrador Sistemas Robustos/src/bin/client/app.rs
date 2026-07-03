@@ -3,10 +3,26 @@
 // ─────────────────────────────────────────────────────────
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ratatui_explorer::FileExplorer;
+
+use gato_p2p::player::PlayerHandle;
 use gato_p2p::proto::{GroupInfo, NodeInfo};
 use gato_p2p::transfer::FileChunk;
+
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "mpg", "mpeg"];
+
+/// true si `file_name` tiene una extensión de video conocida (para
+/// autoreproducir con mpv al terminar de recibirlo).
+pub fn is_video_file(file_name: &str) -> bool {
+    Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
 
 /// Eventos que el `PeerService` propio (ver `client/peer.rs`) empuja hacia
 /// el loop principal de la TUI a través de un canal `mpsc`. Se declaran
@@ -18,8 +34,11 @@ pub enum ClientEvent {
     DirectMessage { from: String, content: String },
     #[allow(dead_code)] // consumido a partir del commit de grupos
     GroupMessage { from: String, group: String, content: String },
-    #[allow(dead_code)] // consumido a partir del commit de transferencia de archivos
-    FileChunkReceived(FileChunk),
+    FileChunkReceived { from: String, chunk: FileChunk },
+    /// Mensaje de estado genérico (progreso/errores de una tarea en
+    /// background, p. ej. una transferencia de archivo) que se agrega al
+    /// historial de `target` como si lo mandara "Sistema".
+    SystemMessage { target: String, content: String },
     #[allow(dead_code)] // consumido a partir del commit de videollamada
     VideoFrame { from: String, jpeg: Vec<u8> },
     #[allow(dead_code)] // consumido a partir del commit de gato embebido
@@ -44,11 +63,15 @@ pub struct AppState {
     pub selected_contact: Option<String>, // username o nombre de grupo
     pub chats: HashMap<String, Vec<ChatMessage>>, // historial por contacto/grupo
     pub input_buffer: String,
-    #[allow(dead_code)] // usado a partir del commit de gato/archivos
     pub mode: AppMode,
     pub focus: Focus,
-    #[allow(dead_code)] // usado a partir del commit de transferencia de archivos
-    pub file_explorer_open: bool,
+    pub file_explorer: Option<FileExplorer>,
+    /// Chunks acumulados de una transferencia en curso, por (remitente, nombre de archivo).
+    pub file_recv_buffers: HashMap<(String, String), Vec<FileChunk>>,
+    /// Reproductores mpv/ffplay lanzados para archivos recibidos; se
+    /// conservan aquí para que `Drop` no los mate apenas termina la función
+    /// que los abrió (`Drop` de `PlayerHandle` mata el proceso).
+    pub active_players: Vec<PlayerHandle>,
     #[allow(dead_code)] // usado a partir del commit de gato embebido
     pub game_state: Option<GameState>,
     #[allow(dead_code)] // usado a partir del commit de videollamada
@@ -61,7 +84,6 @@ pub enum AppMode {
     Chat,
     #[allow(dead_code)]
     Game,
-    #[allow(dead_code)]
     FileExplorer,
 }
 
@@ -96,7 +118,9 @@ impl AppState {
             input_buffer: String::new(),
             mode: AppMode::Chat,
             focus: Focus::Contacts,
-            file_explorer_open: false,
+            file_explorer: None,
+            file_recv_buffers: HashMap::new(),
+            active_players: Vec::new(),
             game_state: None,
             video_active: false,
             should_quit: false,
@@ -178,6 +202,56 @@ impl AppState {
     /// antes de una llamada P2P directa).
     pub fn find_node(&self, username: &str) -> Option<&NodeInfo> {
         self.directory.iter().find(|n| n.username == username)
+    }
+
+    /// Acumula un chunk de archivo recibido y, al llegar el último, reconstruye
+    /// el archivo en `./recibidos/`, deja constancia en el chat de `from` y,
+    /// si es un video, lo reproduce automáticamente con mpv/ffplay.
+    pub fn receive_file_chunk(&mut self, from: String, chunk: FileChunk) {
+        let key = (from.clone(), chunk.file_name.clone());
+        let is_last = chunk.chunk_index + 1 == chunk.total_chunks;
+        self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
+
+        if !is_last {
+            return;
+        }
+
+        let Some(mut chunks) = self.file_recv_buffers.remove(&key) else { return };
+        chunks.sort_by_key(|c| c.chunk_index);
+        let file_name = key.1;
+
+        match gato_p2p::transfer::decrypt_and_reconstruct(&chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos") {
+            Ok(path) => {
+                self.record_message(
+                    from.clone(),
+                    from.clone(),
+                    format!("📎 Archivo recibido: {} → {}", file_name, path),
+                );
+                if is_video_file(&file_name) {
+                    match PlayerHandle::play_file(Path::new(&path)) {
+                        Ok(handle) => self.active_players.push(handle),
+                        Err(e) => self.record_message(
+                            from,
+                            "Sistema".to_string(),
+                            format!("No se pudo reproducir {}: {}", file_name, e),
+                        ),
+                    }
+                }
+            }
+            Err(e) => {
+                self.record_message(
+                    from,
+                    "Sistema".to_string(),
+                    format!("Error recibiendo {}: {}", file_name, e),
+                );
+            }
+        }
+    }
+
+    /// Limpia reproductores que ya terminaron (evita que `active_players`
+    /// crezca indefinidamente durante una sesión larga).
+    pub fn sweep_finished_players(&mut self) {
+        self.active_players.retain_mut(|h| h.is_running());
     }
 }
 

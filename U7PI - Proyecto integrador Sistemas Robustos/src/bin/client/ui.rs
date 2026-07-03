@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -39,6 +39,37 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     render_contacts(frame, body[0], app);
     render_chat(frame, body[1], app);
     render_input(frame, rows[2], app);
+
+    if let Some(explorer) = &app.file_explorer {
+        let area = centered_rect(70, 75, frame.area());
+        frame.render_widget(Clear, area);
+        frame.render_widget_ref(explorer.widget(), area);
+    }
+}
+
+/// Rect centrado con los porcentajes dados respecto al área padre (overlay
+/// del explorador de archivos).
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let margin_v = (100 - percent_y) / 2;
+    let margin_h = (100 - percent_x) / 2;
+
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(margin_v),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage(margin_v),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(margin_h),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage(margin_h),
+        ])
+        .split(vert[1])[1]
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &AppState) {

@@ -24,10 +24,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui_explorer::FileExplorer;
 use tarpc::{client, context, tokio_serde::formats::Json};
 use tokio::sync::mpsc;
 
-use app::{AppState, ClientEvent, Focus};
+use app::{AppMode, AppState, ClientEvent, Focus};
 use gato_p2p::proto::{NodeInfo, RegistryServiceClient};
 
 const SERVER_ADDR: &str = "127.0.0.1:9000";
@@ -97,7 +98,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
     // El listener PeerService propio debe estar arriba ANTES de registrarse:
     // el servidor de descubrimiento se conecta de vuelta a este puerto para
     // empujar notify_directory apenas nos registremos.
-    let my_port = peer::start_listener(event_tx).await?;
+    let my_port = peer::start_listener(event_tx.clone()).await?;
 
     let transport = tarpc::serde_transport::tcp::connect(SERVER_ADDR, Json::default).await?;
     let registry = RegistryServiceClient::new(client::Config::default(), transport).spawn();
@@ -123,7 +124,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal, &mut app, event_rx).await;
+    let result = run_loop(&mut terminal, &mut app, event_rx, event_tx).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -141,6 +142,7 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
     mut event_rx: mpsc::Receiver<ClientEvent>,
+    event_tx: mpsc::Sender<ClientEvent>,
 ) -> anyhow::Result<()> {
     let mut last_tick = Instant::now();
 
@@ -150,7 +152,10 @@ async fn run_loop(
         let timeout = TICK_RATE.checked_sub(last_tick.elapsed()).unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if app.file_explorer.is_some() {
+                handle_explorer_event(app, &ev, &event_tx);
+            } else if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
                     handle_key(app, key.code);
                 }
@@ -160,6 +165,8 @@ async fn run_loop(
         while let Ok(event) = event_rx.try_recv() {
             handle_client_event(app, event);
         }
+
+        app.sweep_finished_players();
 
         if last_tick.elapsed() >= TICK_RATE {
             last_tick = Instant::now();
@@ -179,16 +186,27 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::GroupMessage { from, group, content } => {
             app.record_message(group, from, content);
         }
+        ClientEvent::FileChunkReceived { from, chunk } => {
+            app.receive_file_chunk(from, chunk);
+        }
+        ClientEvent::SystemMessage { target, content } => {
+            app.record_message(target, "Sistema".to_string(), content);
+        }
         ClientEvent::DirectoryUpdated(nodes) => {
             app.directory = nodes;
         }
         // El resto de variantes se maneja a partir de sus commits
-        // correspondientes (archivos, gato, grupos, video).
+        // correspondientes (gato, grupos, video).
         _ => {}
     }
 }
 
 fn handle_key(app: &mut AppState, code: KeyCode) {
+    if code == KeyCode::F(2) {
+        open_file_explorer(app);
+        return;
+    }
+
     match app.focus {
         Focus::Contacts => match code {
             KeyCode::Up => app.select_prev(),
@@ -209,6 +227,89 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
             _ => {}
         },
     }
+}
+
+/// `[F2]` — abre el explorador de archivos para adjuntar uno al contacto
+/// seleccionado. El envío grupal (fan-out) llega en el commit de grupos.
+fn open_file_explorer(app: &mut AppState) {
+    let Some(target) = app.selected_contact.clone() else { return };
+    if app.is_group(&target) {
+        app.record_message(
+            target,
+            "Sistema".to_string(),
+            "Enviar archivos a un grupo llega en un commit posterior.".to_string(),
+        );
+        return;
+    }
+    if let Ok(explorer) = FileExplorer::new() {
+        app.file_explorer = Some(explorer);
+        app.mode = AppMode::FileExplorer;
+    }
+}
+
+/// Enruta los eventos de teclado/mouse al explorador mientras está abierto,
+/// e intercepta `Esc` (cancelar) y `Enter` (confirmar selección de archivo).
+fn handle_explorer_event(app: &mut AppState, ev: &Event, event_tx: &mpsc::Sender<ClientEvent>) {
+    if let Some(explorer) = app.file_explorer.as_mut() {
+        let _ = explorer.handle(ev);
+    }
+
+    let Event::Key(key) = ev else { return };
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.file_explorer = None;
+            app.mode = AppMode::Chat;
+        }
+        KeyCode::Enter => {
+            let maybe_path = app
+                .file_explorer
+                .as_ref()
+                .filter(|e| e.current().is_file())
+                .map(|e| e.current().path().to_string_lossy().to_string());
+
+            if let Some(path) = maybe_path {
+                app.file_explorer = None;
+                app.mode = AppMode::Chat;
+                start_file_send(app, path, event_tx.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fragmenta+cifra el archivo (reutilizando `transfer.rs`/`crypto.rs` con
+/// la clave fija del proyecto) y lo envía por P2P en background; el
+/// resultado (éxito o error) se reporta como `SystemMessage` en el chat
+/// del contacto seleccionado.
+fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<ClientEvent>) {
+    let Some(target) = app.selected_contact.clone() else { return };
+    let Some(node) = app.find_node(&target) else { return };
+
+    let ip = node.ip.clone();
+    let port = node.port;
+    let from = app.my_info.username.clone();
+    let file_name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+
+    app.record_message(target.clone(), "Sistema".to_string(), format!("📎 Enviando {}...", file_name));
+
+    tokio::spawn(async move {
+        let result = match gato_p2p::transfer::fragment_and_encrypt(&path, gato_p2p::CLAVE_VIGENERE) {
+            Ok(chunks) => peer::send_file_to(&ip, port, from, chunks).await,
+            Err(e) => Err(e),
+        };
+        let content = match result {
+            Ok(()) => format!("✅ {} enviado", file_name),
+            Err(e) => format!("❌ Error enviando {}: {}", file_name, e),
+        };
+        let _ = event_tx.send(ClientEvent::SystemMessage { target, content }).await;
+    });
 }
 
 /// Procesa el buffer de entrada (traduce `/e `), lo agrega al historial

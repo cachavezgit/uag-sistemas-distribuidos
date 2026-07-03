@@ -51,8 +51,8 @@ impl PeerService for PeerServer {
         self.emit(ClientEvent::GroupMessage { from, group, content }).await
     }
 
-    async fn send_file_chunk(self, _: context::Context, _from: String, chunk: FileChunk) -> Result<(), String> {
-        self.emit(ClientEvent::FileChunkReceived(chunk)).await
+    async fn send_file_chunk(self, _: context::Context, from: String, chunk: FileChunk) -> Result<(), String> {
+        self.emit(ClientEvent::FileChunkReceived { from, chunk }).await
     }
 
     async fn send_video_frame(self, _: context::Context, from: String, jpeg_data: Vec<u8>) -> Result<(), String> {
@@ -130,4 +130,23 @@ pub async fn send_message_to(ip: &str, port: u16, from: String, content: String)
         .send_message(context::current(), from, content)
         .await?
         .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Envía todos los chunks de un archivo ya fragmentado/cifrado
+/// (`transfer::fragment_and_encrypt`) a un peer, sobre una única conexión,
+/// esperando el ack de cada chunk antes de mandar el siguiente (igual que
+/// `network::send_file_chunks` en el U6).
+pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChunk>) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", ip, port);
+    let transport = tarpc::serde_transport::tcp::connect(&addr, Json::default).await?;
+    let client = PeerServiceClient::new(client::Config::default(), transport).spawn();
+
+    for chunk in chunks {
+        client
+            .send_file_chunk(context::current(), from.clone(), chunk)
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+
+    Ok(())
 }
