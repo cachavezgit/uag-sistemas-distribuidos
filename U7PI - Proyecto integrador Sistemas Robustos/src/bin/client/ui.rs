@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{AppState, Focus};
+use super::app::{AppMode, AppState, Focus};
 
 const COLOR_HEADER_BG: Color = Color::Rgb(31, 56, 100);
 const COLOR_SELECTED: Color = Color::Blue;
@@ -37,7 +37,11 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         .split(rows[1]);
 
     render_contacts(frame, body[0], app);
-    render_chat(frame, body[1], app);
+    if app.mode == AppMode::Game {
+        render_game(frame, body[1], app);
+    } else {
+        render_chat(frame, body[1], app);
+    }
     render_input(frame, rows[2], app);
 
     if let Some(explorer) = &app.file_explorer {
@@ -183,6 +187,55 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &AppState) {
         .collect();
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Tablero de gato embebido — reemplaza el panel de chat en `AppMode::Game`.
+fn render_game(frame: &mut Frame, area: Rect, app: &AppState) {
+    let Some(game) = &app.game_state else { return };
+
+    let title = format!(" 🎮 Gato con: {} ", game.opponent);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // estado/turno
+            Constraint::Length(1), // separador
+            Constraint::Min(5),    // tablero
+            Constraint::Length(1), // controles
+        ])
+        .split(inner);
+
+    let (turno_texto, turno_color) = if game.my_turn {
+        (format!("Tu turno: {}", game.my_symbol), Color::Green)
+    } else {
+        (format!("Turno de {} — esperando...", game.opponent), Color::Yellow)
+    };
+    frame.render_widget(
+        Paragraph::new(turno_texto)
+            .style(Style::default().fg(turno_color).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center),
+        rows[0],
+    );
+
+    let cell = |i: usize| game.board[i].map(|c| c.to_string()).unwrap_or_else(|| (i + 1).to_string());
+    let board_lines = vec![
+        Line::from(format!("    {}   │   {}   │   {}    ", cell(0), cell(1), cell(2))).alignment(Alignment::Center),
+        Line::from("   ───────┼───────┼───────").alignment(Alignment::Center),
+        Line::from(format!("    {}   │   {}   │   {}    ", cell(3), cell(4), cell(5))).alignment(Alignment::Center),
+        Line::from("   ───────┼───────┼───────").alignment(Alignment::Center),
+        Line::from(format!("    {}   │   {}   │   {}    ", cell(6), cell(7), cell(8))).alignment(Alignment::Center),
+    ];
+    frame.render_widget(Paragraph::new(board_lines), rows[2]);
+
+    frame.render_widget(
+        Paragraph::new("[1-9] Seleccionar casilla   |   [Esc] Abandonar partida")
+            .style(Style::default().fg(COLOR_DIM))
+            .alignment(Alignment::Center),
+        rows[3],
+    );
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &AppState) {

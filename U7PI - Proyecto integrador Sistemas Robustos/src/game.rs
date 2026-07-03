@@ -169,3 +169,84 @@ impl Game {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────
+// Verificación de ganador para el gato embebido en la TUI (U7PI)
+//
+// Función libre e independiente de `Game`/`Cell`: el gato embebido en el
+// chat usa su propia representación de tablero (`[Option<char>; 9]`,
+// 'X'/'O') en `client::app::GameState`, más simple que la de `Game` (no
+// necesita historial de movidas ni turno-por-jugador-numérico). Se agrega
+// aparte para no modificar el `Game` existente.
+// ─────────────────────────────────────────────────────────
+
+/// Retorna `Some('X')`/`Some('O')` si esa marca completó una línea ganadora
+/// en `board`, o `None` si no hay ganador todavía (sigue en juego o empate).
+pub fn verificar_ganador(board: &[Option<char>; 9]) -> Option<char> {
+    const LINEAS_GANADORAS: [[usize; 3]; 8] = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8], // filas
+        [0, 3, 6], [1, 4, 7], [2, 5, 8], // columnas
+        [0, 4, 8], [2, 4, 6],            // diagonales
+    ];
+
+    for [a, b, c] in LINEAS_GANADORAS {
+        if let (Some(x), Some(y), Some(z)) = (board[a], board[b], board[c]) {
+            if x == y && y == z {
+                return Some(x);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests_gato_embebido {
+    use super::verificar_ganador;
+
+    #[test]
+    fn game_detectar_ganador_fila() {
+        let board = [
+            Some('X'), Some('X'), Some('X'),
+            None, None, None,
+            None, None, None,
+        ];
+        assert_eq!(verificar_ganador(&board), Some('X'));
+    }
+
+    #[test]
+    fn game_detectar_ganador_columna() {
+        let board = [
+            Some('O'), None, None,
+            Some('O'), Some('X'), Some('X'),
+            Some('O'), None, None,
+        ];
+        assert_eq!(verificar_ganador(&board), Some('O'));
+    }
+
+    #[test]
+    fn game_detectar_ganador_diagonal() {
+        let board = [
+            Some('X'), Some('O'), None,
+            None, Some('X'), Some('O'),
+            None, None, Some('X'),
+        ];
+        assert_eq!(verificar_ganador(&board), Some('X'));
+    }
+
+    #[test]
+    fn game_sin_ganador_tablero_vacio() {
+        let board: [Option<char>; 9] = [None; 9];
+        assert_eq!(verificar_ganador(&board), None);
+    }
+
+    #[test]
+    fn game_sin_ganador_empate() {
+        // X O X / X O O / O X X — lleno, sin línea ganadora
+        let board = [
+            Some('X'), Some('O'), Some('X'),
+            Some('X'), Some('O'), Some('O'),
+            Some('O'), Some('X'), Some('X'),
+        ];
+        assert_eq!(verificar_ganador(&board), None);
+    }
+}

@@ -119,14 +119,18 @@ pub async fn start_listener(events: mpsc::Sender<ClientEvent>) -> anyhow::Result
     Ok(port)
 }
 
-/// Dial efímero al PeerService de otro nodo para enviarle un mensaje
-/// directo. Se conecta por mensaje en vez de cachear la conexión — más
-/// simple y suficientemente rápido para la cadencia de un chat.
-pub async fn send_message_to(ip: &str, port: u16, from: String, content: String) -> anyhow::Result<()> {
+/// Dial efímero al PeerService de otro nodo. Cada llamada abre una conexión
+/// nueva en vez de cachearla — simple y suficientemente rápido para la
+/// cadencia de un chat/partida de gato (no para streaming, ver `send_file_to`).
+async fn dial(ip: &str, port: u16) -> anyhow::Result<PeerServiceClient> {
     let addr = format!("{}:{}", ip, port);
     let transport = tarpc::serde_transport::tcp::connect(&addr, Json::default).await?;
-    let client = PeerServiceClient::new(client::Config::default(), transport).spawn();
-    client
+    Ok(PeerServiceClient::new(client::Config::default(), transport).spawn())
+}
+
+pub async fn send_message_to(ip: &str, port: u16, from: String, content: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
         .send_message(context::current(), from, content)
         .await?
         .map_err(|e| anyhow::anyhow!(e))
@@ -137,9 +141,7 @@ pub async fn send_message_to(ip: &str, port: u16, from: String, content: String)
 /// esperando el ack de cada chunk antes de mandar el siguiente (igual que
 /// `network::send_file_chunks` en el U6).
 pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChunk>) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", ip, port);
-    let transport = tarpc::serde_transport::tcp::connect(&addr, Json::default).await?;
-    let client = PeerServiceClient::new(client::Config::default(), transport).spawn();
+    let client = dial(ip, port).await?;
 
     for chunk in chunks {
         client
@@ -149,4 +151,28 @@ pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChu
     }
 
     Ok(())
+}
+
+pub async fn game_invite_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .game_invite(context::current(), from)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+pub async fn game_accept_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .game_accept(context::current(), from)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+pub async fn game_move_to(ip: &str, port: u16, from: String, position: u8) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .game_move(context::current(), from, position)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
 }

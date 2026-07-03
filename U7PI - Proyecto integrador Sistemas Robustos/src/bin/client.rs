@@ -195,13 +195,21 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::DirectoryUpdated(nodes) => {
             app.directory = nodes;
         }
+        ClientEvent::GameInvite { from } => app.receive_game_invite(from),
+        ClientEvent::GameAccept { from } => app.start_game_as_inviter(from),
+        ClientEvent::GameMove { from, position } => app.apply_remote_move(from, position),
         // El resto de variantes se maneja a partir de sus commits
-        // correspondientes (gato, grupos, video).
+        // correspondientes (grupos, video).
         _ => {}
     }
 }
 
 fn handle_key(app: &mut AppState, code: KeyCode) {
+    if app.mode == AppMode::Game {
+        handle_game_key(app, code);
+        return;
+    }
+
     if code == KeyCode::F(2) {
         open_file_explorer(app);
         return;
@@ -212,6 +220,9 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
             KeyCode::Up => app.select_prev(),
             KeyCode::Down => app.select_next(),
             KeyCode::Tab => app.toggle_focus(),
+            KeyCode::Char('a') | KeyCode::Char('A') if app.pending_game_invite.is_some() => {
+                accept_game_invite(app);
+            }
             KeyCode::Char('q') => app.should_quit = true,
             KeyCode::Esc => app.should_quit = true,
             _ => {}
@@ -227,6 +238,61 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
             _ => {}
         },
     }
+}
+
+/// Teclado durante `AppMode::Game`: `[1-9]` juega una casilla, `[Esc]` abandona.
+fn handle_game_key(app: &mut AppState, code: KeyCode) {
+    match code {
+        KeyCode::Esc => app.abandon_game(),
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            let position = c as u8 - b'1'; // '1'-'9' → 0-8
+            if let Some((ip, port, from)) = app.play_local_move(position) {
+                tokio::spawn(async move {
+                    let _ = peer::game_move_to(&ip, port, from, position).await;
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `[A]` — acepta la invitación de gato pendiente (si hay alguna) y avisa
+/// al peer que la mandó vía `game_accept`.
+fn accept_game_invite(app: &mut AppState) {
+    let Some(from) = app.pending_game_invite.clone() else { return };
+    let Some(node) = app.find_node(&from) else { return };
+    let ip = node.ip.clone();
+    let port = node.port;
+    let my_username = app.my_info.username.clone();
+
+    app.start_game_as_acceptor(from);
+
+    tokio::spawn(async move {
+        let _ = peer::game_accept_to(&ip, port, my_username).await;
+    });
+}
+
+/// `/gato` — invita al contacto seleccionado a jugar.
+fn start_game_invite(app: &mut AppState) {
+    let Some(target) = app.selected_contact.clone() else { return };
+    if app.is_group(&target) {
+        app.record_message(
+            target,
+            "Sistema".to_string(),
+            "No se puede jugar al gato con un grupo.".to_string(),
+        );
+        return;
+    }
+    let Some(node) = app.find_node(&target) else { return };
+    let ip = node.ip.clone();
+    let port = node.port;
+    let from = app.my_info.username.clone();
+
+    app.mark_game_invite_sent(target.clone());
+
+    tokio::spawn(async move {
+        let _ = peer::game_invite_to(&ip, port, from).await;
+    });
 }
 
 /// `[F2]` — abre el explorador de archivos para adjuntar uno al contacto
@@ -320,6 +386,12 @@ fn submit_message(app: &mut AppState) {
         return;
     }
     let raw = std::mem::take(&mut app.input_buffer);
+
+    if raw.trim() == "/gato" {
+        start_game_invite(app);
+        return;
+    }
+
     let content = gato_p2p::emoji::procesar(&raw);
 
     let Some(target) = app.selected_contact.clone() else { return };

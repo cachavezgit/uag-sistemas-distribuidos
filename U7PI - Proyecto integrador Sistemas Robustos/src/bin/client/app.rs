@@ -41,11 +41,8 @@ pub enum ClientEvent {
     SystemMessage { target: String, content: String },
     #[allow(dead_code)] // consumido a partir del commit de videollamada
     VideoFrame { from: String, jpeg: Vec<u8> },
-    #[allow(dead_code)] // consumido a partir del commit de gato embebido
     GameMove { from: String, position: u8 },
-    #[allow(dead_code)]
     GameInvite { from: String },
-    #[allow(dead_code)]
     GameAccept { from: String },
     DirectoryUpdated(Vec<NodeInfo>),
     #[allow(dead_code)] // consumido a partir del commit de grupos
@@ -72,22 +69,24 @@ pub struct AppState {
     /// conservan aquí para que `Drop` no los mate apenas termina la función
     /// que los abrió (`Drop` de `PlayerHandle` mata el proceso).
     pub active_players: Vec<PlayerHandle>,
-    #[allow(dead_code)] // usado a partir del commit de gato embebido
     pub game_state: Option<GameState>,
+    /// Username al que le mandé una invitación de gato y todavía no responde.
+    pub pending_game_invite_sent: Option<String>,
+    /// Username que me invitó a jugar y todavía no acepté/rechacé.
+    pub pending_game_invite: Option<String>,
     #[allow(dead_code)] // usado a partir del commit de videollamada
     pub video_active: bool,
     pub should_quit: bool,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum AppMode {
     Chat,
-    #[allow(dead_code)]
     Game,
     FileExplorer,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Focus {
     Contacts,
     Input,
@@ -99,7 +98,6 @@ pub struct ChatMessage {
     pub timestamp: String,
 }
 
-#[allow(dead_code)] // usado a partir del commit de gato embebido
 pub struct GameState {
     pub board: [Option<char>; 9],
     pub my_symbol: char,
@@ -122,6 +120,8 @@ impl AppState {
             file_recv_buffers: HashMap::new(),
             active_players: Vec::new(),
             game_state: None,
+            pending_game_invite_sent: None,
+            pending_game_invite: None,
             video_active: false,
             should_quit: false,
         };
@@ -253,6 +253,131 @@ impl AppState {
     pub fn sweep_finished_players(&mut self) {
         self.active_players.retain_mut(|h| h.is_running());
     }
+
+    /// Marca que le mandé una invitación de gato a `target` y deja constancia
+    /// en el chat. El envío del RPC lo hace el llamador (necesita red).
+    pub fn mark_game_invite_sent(&mut self, target: String) {
+        self.pending_game_invite_sent = Some(target.clone());
+        self.record_message(target.clone(), "Sistema".to_string(), format!("🎮 Invitación de gato enviada a {}...", target));
+    }
+
+    /// Registra una invitación entrante de `from` y selecciona su chat para
+    /// que el aviso "[A] Aceptar" sea visible de inmediato.
+    pub fn receive_game_invite(&mut self, from: String) {
+        self.record_message(
+            from.clone(),
+            "Sistema".to_string(),
+            format!("🎮 {} te invita a jugar al gato. [A] para aceptar (con foco en Contactos).", from),
+        );
+        self.pending_game_invite = Some(from.clone());
+        self.selected_contact = Some(from);
+    }
+
+    /// El peer `from` aceptó nuestra invitación a jugar: arranca la partida
+    /// como jugador `X` (el que invita siempre empieza). Ignora aceptaciones
+    /// que no corresponden a una invitación pendiente nuestra.
+    pub fn start_game_as_inviter(&mut self, from: String) {
+        if self.pending_game_invite_sent.as_deref() != Some(from.as_str()) {
+            return;
+        }
+        self.pending_game_invite_sent = None;
+        self.game_state = Some(GameState {
+            board: [None; 9],
+            my_symbol: 'X',
+            opponent: from.clone(),
+            my_turn: true,
+        });
+        self.mode = AppMode::Game;
+        self.record_message(from, "Sistema".to_string(), "🎮 ¡Partida iniciada! Tu turno.".to_string());
+    }
+
+    /// Acepté la invitación de `from`: arranca la partida como jugador `O`.
+    pub fn start_game_as_acceptor(&mut self, from: String) {
+        self.pending_game_invite = None;
+        self.game_state = Some(GameState {
+            board: [None; 9],
+            my_symbol: 'O',
+            opponent: from.clone(),
+            my_turn: false,
+        });
+        self.mode = AppMode::Game;
+        self.record_message(from, "Sistema".to_string(), "🎮 ¡Partida iniciada! Esperando movimiento rival.".to_string());
+    }
+
+    /// Aplica mi jugada local si es válida (mi turno, casilla libre, 0-8).
+    /// Retorna `(ip, puerto, mi_username)` del rival para que el llamador
+    /// dispare el RPC `game_move` — separado porque `AppState` no conoce
+    /// tokio/red.
+    pub fn play_local_move(&mut self, position: u8) -> Option<(String, u16, String)> {
+        let idx = position as usize;
+        if idx >= 9 {
+            return None;
+        }
+
+        let opponent = {
+            let game = self.game_state.as_mut()?;
+            if !game.my_turn || game.board[idx].is_some() {
+                return None;
+            }
+            game.board[idx] = Some(game.my_symbol);
+            game.my_turn = false;
+            game.opponent.clone()
+        };
+
+        self.check_game_result();
+
+        let node = self.find_node(&opponent)?;
+        Some((node.ip.clone(), node.port, self.my_info.username.clone()))
+    }
+
+    /// Aplica la jugada recibida del rival (RPC `game_move`).
+    pub fn apply_remote_move(&mut self, from: String, position: u8) {
+        let idx = position as usize;
+        if idx >= 9 {
+            return;
+        }
+        {
+            let Some(game) = self.game_state.as_mut() else { return };
+            if game.opponent != from || game.board[idx].is_some() {
+                return;
+            }
+            let rival_symbol = if game.my_symbol == 'X' { 'O' } else { 'X' };
+            game.board[idx] = Some(rival_symbol);
+            game.my_turn = true;
+        }
+        self.check_game_result();
+    }
+
+    /// Abandona la partida en curso (tecla `[Esc]` en `AppMode::Game`), si hay alguna.
+    pub fn abandon_game(&mut self) {
+        if let Some(game) = self.game_state.take() {
+            self.record_message(game.opponent, "Sistema".to_string(), "🚪 Abandonaste la partida de gato.".to_string());
+        }
+        self.mode = AppMode::Chat;
+    }
+
+    /// Revisa si la partida en curso ya tiene ganador o terminó en empate;
+    /// si es así, deja constancia en el chat y vuelve a `AppMode::Chat`.
+    fn check_game_result(&mut self) {
+        let Some(game) = self.game_state.as_ref() else { return };
+        let ganador = gato_p2p::game::verificar_ganador(&game.board);
+        let empate = ganador.is_none() && game.board.iter().all(|c| c.is_some());
+
+        if ganador.is_none() && !empate {
+            return;
+        }
+
+        let opponent = game.opponent.clone();
+        let mensaje = match ganador {
+            Some(symbol) if symbol == game.my_symbol => "🎉 ¡Ganaste la partida de gato!".to_string(),
+            Some(_) => "😞 Perdiste la partida de gato.".to_string(),
+            None => "🤝 ¡Empate en la partida de gato!".to_string(),
+        };
+
+        self.game_state = None;
+        self.mode = AppMode::Chat;
+        self.record_message(opponent, "Sistema".to_string(), mensaje);
+    }
 }
 
 pub fn timestamp_now() -> String {
@@ -262,4 +387,97 @@ pub fn timestamp_now() -> String {
         .as_secs();
     let secs_of_day = secs % 86400;
     format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(username: &str) -> NodeInfo {
+        NodeInfo {
+            username: username.to_string(),
+            emoji: "🙂".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: 0,
+        }
+    }
+
+    /// Simula la partida completa entre dos `AppState` (sin red ni TUI real):
+    /// invitación, aceptación, y las jugadas alternadas se "transmiten" a
+    /// mano de un estado al otro, igual que haría el RPC real. Cubre el
+    /// mismo estado que ejercita `client.rs`, pero de forma determinística.
+    #[test]
+    fn partida_completa_invitar_aceptar_y_ganar() {
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+
+        // Ivan invita a Carlos ("/gato")
+        ivan.mark_game_invite_sent("Carlos".to_string());
+        assert_eq!(ivan.pending_game_invite_sent.as_deref(), Some("Carlos"));
+
+        // Carlos recibe la invitación y la acepta ("[A]")
+        carlos.receive_game_invite("Ivan".to_string());
+        assert_eq!(carlos.pending_game_invite.as_deref(), Some("Ivan"));
+        carlos.start_game_as_acceptor("Ivan".to_string());
+        assert!(carlos.pending_game_invite.is_none());
+
+        // Ivan recibe la aceptación y arranca como X con el primer turno
+        ivan.start_game_as_inviter("Carlos".to_string());
+        {
+            let game = ivan.game_state.as_ref().unwrap();
+            assert_eq!(game.my_symbol, 'X');
+            assert!(game.my_turn);
+        }
+        {
+            let game = carlos.game_state.as_ref().unwrap();
+            assert_eq!(game.my_symbol, 'O');
+            assert!(!game.my_turn);
+        }
+
+        // X: 0, O: 3, X: 1, O: 4, X: 2 → X gana la fila superior (0,1,2)
+        for &(posicion, es_ivan) in &[(0u8, true), (3, false), (1, true), (4, false), (2, true)] {
+            if es_ivan {
+                let (ip, port, from) = ivan.play_local_move(posicion).expect("jugada de Ivan debe ser válida");
+                assert_eq!((ip.as_str(), port, from.as_str()), ("127.0.0.1", 0, "Ivan"));
+                carlos.apply_remote_move("Ivan".to_string(), posicion);
+            } else {
+                let (ip, port, from) = carlos.play_local_move(posicion).expect("jugada de Carlos debe ser válida");
+                assert_eq!((ip.as_str(), port, from.as_str()), ("127.0.0.1", 0, "Carlos"));
+                ivan.apply_remote_move("Carlos".to_string(), posicion);
+            }
+        }
+
+        // La partida terminó para ambos: game_state vuelve a None, modo Chat
+        assert!(ivan.game_state.is_none());
+        assert_eq!(ivan.mode, AppMode::Chat);
+        assert!(carlos.game_state.is_none());
+        assert_eq!(carlos.mode, AppMode::Chat);
+
+        let ivan_msgs = &ivan.chats["Carlos"];
+        let carlos_msgs = &carlos.chats["Ivan"];
+        assert!(ivan_msgs.iter().any(|m| m.content.contains("Ganaste")));
+        assert!(carlos_msgs.iter().any(|m| m.content.contains("Perdiste")));
+    }
+
+    #[test]
+    fn jugada_fuera_de_turno_se_ignora() {
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        carlos.start_game_as_acceptor("Ivan".to_string()); // O, my_turn = false
+        assert!(carlos.play_local_move(0).is_none());
+        assert!(carlos.game_state.unwrap().board[0].is_none());
+    }
+
+    #[test]
+    fn abandonar_partida_limpia_estado_y_avisa() {
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        ivan.mark_game_invite_sent("Carlos".to_string());
+        ivan.start_game_as_inviter("Carlos".to_string());
+        assert!(ivan.game_state.is_some());
+
+        ivan.abandon_game();
+
+        assert!(ivan.game_state.is_none());
+        assert_eq!(ivan.mode, AppMode::Chat);
+        assert!(ivan.chats["Carlos"].iter().any(|m| m.content.contains("Abandonaste")));
+    }
 }
