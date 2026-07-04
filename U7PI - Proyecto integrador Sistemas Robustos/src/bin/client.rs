@@ -295,6 +295,11 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::FileOffer { from, file_name } => app.receive_file_offer(from, file_name),
         ClientEvent::FileAccepted => {
             if let Some(tx) = app.pending_file_send.take() {
+                // El receptor aceptó — avisar en el chat del contacto activo
+                // antes de disparar el envío real.
+                if let Some(target) = app.selected_contact.clone() {
+                    app.record_message(target, "Sistema".to_string(), "📎 Aceptaron la transferencia, enviando...".to_string());
+                }
                 let _ = tx.send(());
             }
         }

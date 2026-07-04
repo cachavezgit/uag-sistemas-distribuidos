@@ -270,10 +270,14 @@ impl AppState {
 
         match gato_p2p::transfer::decrypt_and_reconstruct(&chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos") {
             Ok(path) => {
+                // Mostrar ruta absoluta para que el usuario sepa dónde está el archivo.
+                let abs_path = std::fs::canonicalize(&path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| path.clone());
                 self.record_message(
                     from.clone(),
                     from.clone(),
-                    format!("📎 Archivo recibido: {} → {}", file_name, path),
+                    format!("📎 Archivo recibido: {} → {}", file_name, abs_path),
                 );
                 if is_video_file(&file_name) {
                     match PlayerHandle::play_file(Path::new(&path)) {
