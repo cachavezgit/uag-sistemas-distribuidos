@@ -122,6 +122,45 @@ impl PlayerHandle {
         Ok(PlayerHandle { child, player })
     }
 
+    /// Abre mpv/ffplay configurado para recibir frames JPEG crudos concatenados
+    /// (MJPEG) en tiempo real. Fuerza el demuxer MJPEG y desactiva el buffer
+    /// para latencia mínima — a diferencia de `open_stream()` que deja que mpv
+    /// auto-detecte el formato (útil para archivos, pero bufferiza mucho en vivo).
+    pub fn open_mjpeg_stream() -> Result<(Self, std::process::ChildStdin)> {
+        let player = Player::detect()?;
+
+        let mut child = match &player {
+            Player::MpvIpc(bin, socket_path) => Command::new(bin)
+                .args([
+                    "--no-terminal",
+                    "--demuxer=lavf",
+                    "--demuxer-lavf-format=mjpeg",
+                    "--no-cache",
+                    "--cache-pause=no",
+                    "--framedrop=vo",
+                    &format!("--input-ipc-server={}", socket_path),
+                    "-",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+            Player::Ffplay(bin) => Command::new(bin)
+                .args(["-f", "mjpeg", "-i", "pipe:0", "-autoexit", "-loglevel", "quiet"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        };
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("No se pudo obtener el stdin del reproductor"))?;
+
+        Ok((PlayerHandle { child, player }, stdin))
+    }
+
     /// Abre el reproductor con stdin pipe para streaming en tiempo real.
     /// Con mpv, registra el socket IPC para habilitar controles de playback.
     pub fn open_stream() -> Result<(Self, std::process::ChildStdin)> {

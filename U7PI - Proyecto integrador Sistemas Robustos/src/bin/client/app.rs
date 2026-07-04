@@ -499,7 +499,7 @@ impl AppState {
 
         let needs_player = self.video_session.as_ref().is_some_and(|s| s.stdin.is_none());
         if needs_player {
-            match PlayerHandle::open_stream() {
+            match PlayerHandle::open_mjpeg_stream() {
                 Ok((handle, stdin)) => {
                     self.video_session.as_mut().unwrap().stdin = Some(stdin);
                     self.active_players.push(handle);
