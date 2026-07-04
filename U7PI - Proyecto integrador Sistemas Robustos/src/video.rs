@@ -81,10 +81,18 @@ pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>, cam
                 continue;
             };
 
+            let width = decoded.width();
+            let height = decoded.height();
+            // nokhwa puede devolver un ImageBuffer con stride padding
+            // (bytes extra por fila) cuando el driver V4L2 o la cámara virtual
+            // usa alineación interna. JpegEncoder exige exactamente width*height*3
+            // bytes — extraemos los pixels en un buffer packed para garantizarlo.
+            let packed: Vec<u8> = decoded.pixels().flat_map(|p| p.0).collect();
+
             let mut jpeg_buf = Vec::new();
             let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, JPEG_QUALITY);
             if encoder
-                .encode(decoded.as_raw(), decoded.width(), decoded.height(), ExtendedColorType::Rgb8)
+                .encode(&packed, width, height, ExtendedColorType::Rgb8)
                 .is_err()
             {
                 continue;
