@@ -83,35 +83,37 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &AppState) {
+    // Ancho del panel de usuario: emoji (2) + espacio (1) + nombre + bordes (2) + margen (2)
+    let user_width = (app.my_info.emoji.len() + app.my_info.username.len() + 5) as u16;
+
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(28)])
+        .constraints([Constraint::Length(user_width), Constraint::Min(0)])
         .split(area);
 
-    let left_text = if let Some(session) = &app.video_session {
-        format!("{} {}  📹 En llamada con {}", app.my_info.emoji, app.my_info.username, session.peer)
-    } else {
-        format!("{} {}", app.my_info.emoji, app.my_info.username)
-    };
-
-    let left = Paragraph::new(Line::from(vec![Span::styled(
-        left_text,
+    let left = Paragraph::new(Line::from(Span::styled(
+        format!("{} {}", app.my_info.emoji, app.my_info.username),
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    )]))
+    )))
     .style(Style::default().bg(COLOR_HEADER_BG))
     .block(Block::default().borders(Borders::ALL));
 
-    let right_text = if app.video_active {
-        "[Esc] Colgar"
+    let shortcuts = if app.video_active {
+        if let Some(s) = &app.video_session {
+            format!("  📹 En llamada con {}   [Esc] Colgar", s.peer)
+        } else {
+            "  [Esc] Colgar".to_string()
+        }
     } else {
-        "[G] Grupo  [F4] Video"
+        "  [↑↓] Navegar  [Enter] Escribir  /gato Jugar  [F2] Archivo  [G] Grupo  [F4] Video  [q] Salir"
+            .to_string()
     };
-    let right = Paragraph::new(Line::from(vec![Span::styled(
-        right_text,
+
+    let right = Paragraph::new(Line::from(Span::styled(
+        shortcuts,
         Style::default().fg(Color::White),
-    )]))
+    )))
     .style(Style::default().bg(COLOR_HEADER_BG))
-    .alignment(Alignment::Right)
     .block(Block::default().borders(Borders::ALL));
 
     frame.render_widget(left, cols[0]);
