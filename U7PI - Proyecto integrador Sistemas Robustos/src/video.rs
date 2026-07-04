@@ -28,7 +28,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(66); // ~15 fps
 /// cámara falla. Retorna de inmediato — los errores de captura se logean
 /// y cortan el hilo, no bloquean al llamador (una videollamada sin cámara
 /// disponible no debe tumbar el resto de la app).
-pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>) {
+pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>, camera_index: u32) {
     std::thread::spawn(move || {
         // Requisito de nokhwa en macOS: pedir permiso de cámara antes de
         // abrirla. `requestAccessForMediaType` llama al callback de inmediato
@@ -57,7 +57,7 @@ pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>) {
         }
 
         let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-        let mut camera = match Camera::new(CameraIndex::Index(0), format) {
+        let mut camera = match Camera::new(CameraIndex::Index(camera_index), format) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[Video] No se pudo abrir la cámara: {}", e);

@@ -48,6 +48,7 @@ pub enum ClientEvent {
 
 pub struct AppState {
     pub my_info: NodeInfo,
+    pub camera_index: u32,
     pub directory: Vec<NodeInfo>, // actualizado en tiempo real por push del servidor
     pub groups: Vec<GroupInfo>,
     pub selected_contact: Option<String>, // username o nombre de grupo
@@ -132,9 +133,10 @@ pub enum GroupCreationStep {
 }
 
 impl AppState {
-    pub fn new(my_info: NodeInfo, directory: Vec<NodeInfo>) -> Self {
+    pub fn new(my_info: NodeInfo, directory: Vec<NodeInfo>, camera_index: u32) -> Self {
         let mut app = AppState {
             my_info,
+            camera_index,
             directory,
             groups: Vec::new(),
             selected_contact: None,
@@ -562,8 +564,8 @@ mod tests {
     /// mismo estado que ejercita `client.rs`, pero de forma determinística.
     #[test]
     fn partida_completa_invitar_aceptar_y_ganar() {
-        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
-        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")], 0);
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")], 0);
 
         // Ivan invita a Carlos ("/gato")
         ivan.mark_game_invite_sent("Carlos".to_string());
@@ -615,7 +617,7 @@ mod tests {
 
     #[test]
     fn jugada_fuera_de_turno_se_ignora() {
-        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")], 0);
         carlos.start_game_as_acceptor("Ivan".to_string()); // O, my_turn = false
         assert!(carlos.play_local_move(0).is_none());
         assert!(carlos.game_state.unwrap().board[0].is_none());
@@ -623,7 +625,7 @@ mod tests {
 
     #[test]
     fn abandonar_partida_limpia_estado_y_avisa() {
-        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")], 0);
         ivan.mark_game_invite_sent("Carlos".to_string());
         ivan.start_game_as_inviter("Carlos".to_string());
         assert!(ivan.game_state.is_some());
@@ -667,7 +669,7 @@ mod tests {
 
     #[test]
     fn crear_grupo_sin_miembros_no_finaliza() {
-        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")], 0);
         ivan.start_group_creation();
         ivan.group_creation.as_mut().unwrap().name = "VacioClub".to_string();
         ivan.group_creation.as_mut().unwrap().step = GroupCreationStep::SelectingMembers;
@@ -694,7 +696,7 @@ mod tests {
 
     #[test]
     fn recibir_mensaje_de_grupo_usa_el_nombre_del_grupo_como_chat() {
-        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")], 0);
         carlos.groups.push(GroupInfo {
             name: "Equipo".to_string(),
             members: vec!["Ivan".to_string(), "Carlos".to_string()],
@@ -708,7 +710,7 @@ mod tests {
 
     #[test]
     fn recibir_solicitud_de_videollamada_marca_pendiente_y_selecciona_contacto() {
-        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")], 0);
         carlos.receive_video_call_request("Ivan".to_string());
 
         assert_eq!(carlos.pending_video_call_invite.as_deref(), Some("Ivan"));
@@ -718,7 +720,7 @@ mod tests {
 
     #[test]
     fn start_video_call_activa_sesion_y_bandera() {
-        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")], 0);
         assert!(!ivan.video_active);
 
         let stop = ivan.start_video_call("Carlos".to_string());
@@ -730,7 +732,7 @@ mod tests {
 
     #[test]
     fn end_video_call_detiene_captura_y_limpia_estado() {
-        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")], 0);
         let stop = ivan.start_video_call("Carlos".to_string());
 
         ivan.end_video_call();
@@ -743,7 +745,7 @@ mod tests {
 
     #[test]
     fn frame_de_video_de_otro_peer_se_ignora() {
-        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos"), node("Sofia")]);
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos"), node("Sofia")], 0);
         ivan.start_video_call("Carlos".to_string());
 
         // Un frame que dice venir de "Sofia" no debería tocar la sesión con Carlos.

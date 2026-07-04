@@ -40,6 +40,9 @@ struct Args {
     /// Por defecto 127.0.0.1:9000; en red local usar la IP LAN del servidor,
     /// p. ej. --servidor 192.168.1.10:9000
     servidor: String,
+    /// Índice de cámara a usar para videollamada (default 0 = cámara principal).
+    /// En Linux con cámara virtual: --camara 10 para /dev/video10.
+    camera_index: u32,
 }
 
 fn parse_args() -> Args {
@@ -47,6 +50,7 @@ fn parse_args() -> Args {
     let mut nombre = String::from("Anonimo");
     let mut emoji = String::from("🙂");
     let mut servidor = String::from("192.168.132.23:9000");
+    let mut camera_index: u32 = 0;
 
     let mut i = 1;
     while i < raw.len() {
@@ -69,12 +73,20 @@ fn parse_args() -> Args {
                     i += 1;
                 }
             }
+            "--camara" => {
+                if let Some(v) = raw.get(i + 1) {
+                    if let Ok(n) = v.parse::<u32>() {
+                        camera_index = n;
+                    }
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
-    Args { nombre, emoji, servidor }
+    Args { nombre, emoji, servidor, camera_index }
 }
 
 /// Aviso no fatal si `mpv` no está instalado: la videollamada y la
@@ -154,7 +166,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
         .await?
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let mut app = AppState::new(my_info, directorio);
+    let mut app = AppState::new(my_info, directorio, args.camera_index);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -285,7 +297,7 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
                 let port = node.port;
                 let my_username = app.my_info.username.clone();
                 let stop = app.start_video_call(from);
-                spawn_video_pipeline(ip, port, my_username, stop);
+                spawn_video_pipeline(ip, port, my_username, stop, app.camera_index);
             }
         }
     }
@@ -447,7 +459,7 @@ fn accept_video_call(app: &mut AppState, registry: &RegistryServiceClient) {
     let my_username = app.my_info.username.clone();
 
     let stop = app.start_video_call(from.clone());
-    spawn_video_pipeline(ip, port, my_username.clone(), stop);
+    spawn_video_pipeline(ip, port, my_username.clone(), stop, app.camera_index);
 
     let registry = registry.clone();
     tokio::spawn(async move {
@@ -461,18 +473,18 @@ fn accept_video_call(app: &mut AppState, registry: &RegistryServiceClient) {
 /// Sin el feature `camera` (compilación por defecto en Linux/ARM), esta
 /// función es un no-op: el nodo puede recibir y reproducir video vía mpv
 /// pero no captura ni envía frames propios.
-fn spawn_video_pipeline(ip: String, port: u16, my_username: String, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+fn spawn_video_pipeline(ip: String, port: u16, my_username: String, stop: std::sync::Arc<std::sync::atomic::AtomicBool>, camera_index: u32) {
     #[cfg(feature = "camera")]
     {
         let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(8);
-        gato_p2p::video::start_capture(frame_tx, stop);
+        gato_p2p::video::start_capture(frame_tx, stop, camera_index);
         tokio::spawn(async move {
             let _ = peer::stream_video_to(&ip, port, my_username, frame_rx).await;
         });
     }
     #[cfg(not(feature = "camera"))]
     {
-        let _ = (ip, port, my_username, stop);
+        let _ = (ip, port, my_username, stop, camera_index);
     }
 }
 
