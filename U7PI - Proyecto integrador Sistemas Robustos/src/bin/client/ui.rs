@@ -298,19 +298,26 @@ fn render_group_creation(frame: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &AppState) {
-    let border_style = if app.focus == Focus::Input {
-        Style::default().fg(Color::Blue)
+    let (border_style, title) = if app.focus == Focus::Input {
+        (
+            Style::default().fg(Color::Blue),
+            " [Enter] Enviar  [Esc] Cancelar  [F2] Adjuntar ",
+        )
     } else {
-        Style::default()
+        (
+            Style::default().fg(COLOR_DIM),
+            " [↑↓] Cambiar contacto  [Enter] Escribir  [q] Salir ",
+        )
     };
 
-    let texto = format!("[📎] Mensaje: {}_", app.input_buffer);
+    let cursor = if app.focus == Focus::Input { "_" } else { "" };
+    let texto = format!("Mensaje: {}{}", app.input_buffer, cursor);
 
     let input = Paragraph::new(texto).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(" [Enter] ✓ "),
+            .title(title),
     );
 
     frame.render_widget(input, area);

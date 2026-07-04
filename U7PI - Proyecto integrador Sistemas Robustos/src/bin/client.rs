@@ -244,6 +244,14 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         }
         ClientEvent::DirectoryUpdated(nodes) => {
             app.directory = nodes;
+            // Si no había ningún contacto seleccionado (p.ej. el directorio
+            // estaba vacío al registrarse), auto-seleccionar el primero
+            // disponible cuando llegue el primer push con peers.
+            if app.selected_contact.is_none() {
+                if let Some(first) = app.contact_keys().first() {
+                    app.selected_contact = Some(first.clone());
+                }
+            }
         }
         ClientEvent::GameInvite { from } => app.receive_game_invite(from),
         ClientEvent::GameAccept { from } => app.start_game_as_inviter(from),
@@ -284,11 +292,17 @@ fn handle_key(app: &mut AppState, code: KeyCode, registry: &RegistryServiceClien
         return;
     }
 
+    // ↑/↓ navegan contactos desde cualquier panel
+    match code {
+        KeyCode::Up => { app.select_prev(); return; }
+        KeyCode::Down => { app.select_next(); return; }
+        _ => {}
+    }
+
     match app.focus {
         Focus::Contacts => match code {
-            KeyCode::Up => app.select_prev(),
-            KeyCode::Down => app.select_next(),
-            KeyCode::Tab => app.toggle_focus(),
+            // Tab y Enter enfocan el panel de entrada
+            KeyCode::Tab | KeyCode::Enter => app.toggle_focus(),
             KeyCode::Char('a') | KeyCode::Char('A') if app.pending_game_invite.is_some() => {
                 accept_game_invite(app);
             }
@@ -298,11 +312,20 @@ fn handle_key(app: &mut AppState, code: KeyCode, registry: &RegistryServiceClien
             KeyCode::Char('g') | KeyCode::Char('G') => app.start_group_creation(),
             KeyCode::Char('q') => app.should_quit = true,
             KeyCode::Esc => app.should_quit = true,
+            // Cualquier carácter no asignado arriba: cambiar foco y empezar a escribir
+            KeyCode::Char(c) => {
+                app.toggle_focus();
+                app.input_buffer.push(c);
+            }
             _ => {}
         },
         Focus::Input => match code {
+            // Tab mantiene el buffer; Esc cancela y vuelve a Contactos
             KeyCode::Tab => app.toggle_focus(),
-            KeyCode::Esc => app.input_buffer.clear(),
+            KeyCode::Esc => {
+                app.input_buffer.clear();
+                app.toggle_focus();
+            }
             KeyCode::Enter => submit_message(app),
             KeyCode::Backspace => {
                 app.input_buffer.pop();
