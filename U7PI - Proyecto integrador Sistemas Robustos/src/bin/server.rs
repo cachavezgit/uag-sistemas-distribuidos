@@ -21,7 +21,21 @@ use tarpc::{
 
 use gato_p2p::proto::{GroupInfo, NodeInfo, PeerServiceClient, RegistryService};
 
-const LISTEN_ADDR: &str = "0.0.0.0:9000";
+fn parse_puerto() -> u16 {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--puerto" {
+            if let Some(p) = args.get(i + 1) {
+                if let Ok(n) = p.parse::<u16>() {
+                    return n;
+                }
+            }
+        }
+        i += 1;
+    }
+    9000
+}
 
 #[derive(Clone, Default)]
 struct RegistryState {
@@ -203,9 +217,10 @@ impl RegistryService for RegistryServer {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("[{}] [Registry] Escuchando en {}", gato_p2p::timestamp_log(), LISTEN_ADDR);
+    let listen_addr = format!("0.0.0.0:{}", parse_puerto());
+    println!("[{}] [Registry] Escuchando en {}", gato_p2p::timestamp_log(), listen_addr);
 
-    let mut listener = tarpc::serde_transport::tcp::listen(LISTEN_ADDR, Json::default).await?;
+    let mut listener = tarpc::serde_transport::tcp::listen(&listen_addr, Json::default).await?;
     listener.config_mut().max_frame_length(usize::MAX);
 
     let state = RegistryState::default();

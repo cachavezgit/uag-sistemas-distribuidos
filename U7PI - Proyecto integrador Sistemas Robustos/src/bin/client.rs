@@ -31,18 +31,22 @@ use tokio::sync::mpsc;
 use app::{AppMode, AppState, ClientEvent, Focus};
 use gato_p2p::proto::{NodeInfo, RegistryServiceClient};
 
-const SERVER_ADDR: &str = "127.0.0.1:9000";
 const TICK_RATE: Duration = Duration::from_millis(16);
 
 struct Args {
     nombre: String,
     emoji: String,
+    /// Dirección IP:puerto del servidor de descubrimiento.
+    /// Por defecto 127.0.0.1:9000; en red local usar la IP LAN del servidor,
+    /// p. ej. --servidor 192.168.1.10:9000
+    servidor: String,
 }
 
 fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().collect();
     let mut nombre = String::from("Anonimo");
     let mut emoji = String::from("🙂");
+    let mut servidor = String::from("192.168.132.23:9000");
 
     let mut i = 1;
     while i < raw.len() {
@@ -59,12 +63,18 @@ fn parse_args() -> Args {
                     i += 1;
                 }
             }
+            "--servidor" => {
+                if let Some(v) = raw.get(i + 1) {
+                    servidor = v.clone();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
-    Args { nombre, emoji }
+    Args { nombre, emoji, servidor }
 }
 
 /// Aviso no fatal si `mpv` no está instalado: la videollamada y la
@@ -114,18 +124,28 @@ fn main() {
 async fn iniciar(args: Args) -> anyhow::Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(256);
 
+    // Detectar la IP local correcta para la red donde está el servidor:
+    // se crea un socket UDP "conectado" a la dirección del servidor (no manda
+    // ningún paquete real) y se lee la dirección local que el SO le asignó
+    // según su tabla de ruteo. Así funciona tanto en localhost como en LAN.
+    let my_ip = {
+        let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        probe.connect(&args.servidor).await?;
+        probe.local_addr()?.ip().to_string()
+    };
+
     // El listener PeerService propio debe estar arriba ANTES de registrarse:
     // el servidor de descubrimiento se conecta de vuelta a este puerto para
     // empujar notify_directory apenas nos registremos.
     let my_port = peer::start_listener(event_tx.clone()).await?;
 
-    let transport = tarpc::serde_transport::tcp::connect(SERVER_ADDR, Json::default).await?;
+    let transport = tarpc::serde_transport::tcp::connect(&args.servidor, Json::default).await?;
     let registry = RegistryServiceClient::new(client::Config::default(), transport).spawn();
 
     let my_info = NodeInfo {
         username: args.nombre.clone(),
         emoji: args.emoji.clone(),
-        ip: "127.0.0.1".to_string(),
+        ip: my_ip,
         port: my_port,
     };
 
