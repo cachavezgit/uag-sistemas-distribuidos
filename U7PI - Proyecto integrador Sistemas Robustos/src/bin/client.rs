@@ -19,7 +19,7 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -173,7 +173,22 @@ async fn run_loop(
 
         if event::poll(timeout)? {
             let ev = event::read()?;
-            if app.file_explorer.is_some() {
+
+            // Salida global: funciona sin importar el foco, el modo (chat,
+            // gato, videollamada) o si hay un prompt/explorador abierto —
+            // a diferencia de `q`/`Esc`, que solo salen con foco en
+            // Contactos (ver `handle_key`).
+            let es_ctrl_c = matches!(
+                &ev,
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+            );
+
+            if es_ctrl_c {
+                app.should_quit = true;
+            } else if app.file_explorer.is_some() {
                 handle_explorer_event(app, &ev, &event_tx);
             } else if app.group_creation.is_some() {
                 if let Event::Key(key) = ev {

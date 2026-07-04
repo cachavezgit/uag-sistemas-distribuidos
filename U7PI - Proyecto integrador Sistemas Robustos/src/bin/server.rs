@@ -60,10 +60,16 @@ impl RegistryState {
                 self.peer_clients.lock().unwrap().insert(info.username.clone(), client);
             }
             Ok(Err(e)) => {
-                eprintln!("[Registry] No se pudo conectar de vuelta a {} ({}): {}", info.username, addr, e);
+                eprintln!(
+                    "[{}] [Registry] No se pudo conectar de vuelta a {} ({}): {}",
+                    gato_p2p::timestamp_log(), info.username, addr, e
+                );
             }
             Err(_) => {
-                eprintln!("[Registry] Timeout conectando de vuelta a {} ({})", info.username, addr);
+                eprintln!(
+                    "[{}] [Registry] Timeout conectando de vuelta a {} ({})",
+                    gato_p2p::timestamp_log(), info.username, addr
+                );
             }
         }
     }
@@ -126,7 +132,10 @@ struct RegistryServer {
 
 impl RegistryService for RegistryServer {
     async fn register(self, _: context::Context, info: NodeInfo) -> Result<Vec<NodeInfo>, String> {
-        println!("[Registry] {} ({}) se registró desde {}:{}", info.username, info.emoji, info.ip, info.port);
+        println!(
+            "[{}] [Registry] {} ({}) se registró desde {}:{}",
+            gato_p2p::timestamp_log(), info.username, info.emoji, info.ip, info.port
+        );
         self.state.nodes.lock().unwrap().insert(info.username.clone(), info.clone());
         let snapshot = self.state.directory_snapshot();
 
@@ -144,7 +153,7 @@ impl RegistryService for RegistryServer {
     }
 
     async fn unregister(self, _: context::Context, username: String) -> Result<(), String> {
-        println!("[Registry] {} se desconectó", username);
+        println!("[{}] [Registry] {} se desconectó", gato_p2p::timestamp_log(), username);
         self.state.nodes.lock().unwrap().remove(&username);
         self.state.peer_clients.lock().unwrap().remove(&username);
 
@@ -157,7 +166,10 @@ impl RegistryService for RegistryServer {
     }
 
     async fn create_group(self, _: context::Context, group: GroupInfo) -> Result<(), String> {
-        println!("[Registry] Grupo '{}' creado con miembros {:?}", group.name, group.members);
+        println!(
+            "[{}] [Registry] Grupo '{}' creado con miembros {:?}",
+            gato_p2p::timestamp_log(), group.name, group.members
+        );
         self.state.groups.lock().unwrap().push(group);
 
         let state = self.state.clone();
@@ -191,7 +203,7 @@ impl RegistryService for RegistryServer {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("[Registry] Escuchando en {}", LISTEN_ADDR);
+    println!("[{}] [Registry] Escuchando en {}", gato_p2p::timestamp_log(), LISTEN_ADDR);
 
     let mut listener = tarpc::serde_transport::tcp::listen(LISTEN_ADDR, Json::default).await?;
     listener.config_mut().max_frame_length(usize::MAX);

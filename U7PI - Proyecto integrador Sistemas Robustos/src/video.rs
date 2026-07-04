@@ -31,9 +31,30 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(66); // ~15 fps
 pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         // Requisito de nokhwa en macOS: pedir permiso de cámara antes de
-        // abrirla. Es asíncrono (diálogo del SO), por eso el pequeño sleep.
-        nokhwa::nokhwa_initialize(|_granted| {});
-        std::thread::sleep(Duration::from_millis(200));
+        // abrirla. `requestAccessForMediaType` llama al callback de inmediato
+        // si el usuario ya había aceptado/rechazado antes, y recién espera
+        // de verdad si todavía no hay una decisión (diálogo real del SO) —
+        // por eso se espera el callback con un timeout generoso en vez de
+        // asumir un sleep fijo.
+        let (perm_tx, perm_rx) = std::sync::mpsc::channel();
+        nokhwa::nokhwa_initialize(move |granted| {
+            let _ = perm_tx.send(granted);
+        });
+        match perm_rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("[Video] Permiso de cámara denegado por el sistema operativo.");
+                return;
+            }
+            Err(_) => {
+                eprintln!("[Video] El sistema operativo no respondió al pedido de permiso de cámara a tiempo.");
+                return;
+            }
+        }
+        if !nokhwa::nokhwa_check() {
+            eprintln!("[Video] La cámara no está autorizada para esta app (revisar Ajustes del Sistema → Privacidad y Seguridad → Cámara).");
+            return;
+        }
 
         let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         let mut camera = match Camera::new(CameraIndex::Index(0), format) {

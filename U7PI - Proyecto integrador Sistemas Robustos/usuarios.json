@@ -3,6 +3,7 @@
     { "usuario": "nodo",      "contrasena": "clave123" },
     { "usuario": "jugador1",  "contrasena": "pass1" },
     { "usuario": "jugador2",  "contrasena": "pass2" },
+    { "usuario": "jugador3",  "contrasena": "pass3" },
     { "usuario": "admin",     "contrasena": "admin456" }
   ]
 }
