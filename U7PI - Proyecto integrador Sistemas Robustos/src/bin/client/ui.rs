@@ -85,18 +85,29 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 fn render_header(frame: &mut Frame, area: Rect, app: &AppState) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(24)])
+        .constraints([Constraint::Min(0), Constraint::Length(28)])
         .split(area);
 
+    let left_text = if let Some(session) = &app.video_session {
+        format!("{} {}  📹 En llamada con {}", app.my_info.emoji, app.my_info.username, session.peer)
+    } else {
+        format!("{} {}", app.my_info.emoji, app.my_info.username)
+    };
+
     let left = Paragraph::new(Line::from(vec![Span::styled(
-        format!("{} {}", app.my_info.emoji, app.my_info.username),
+        left_text,
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     )]))
     .style(Style::default().bg(COLOR_HEADER_BG))
     .block(Block::default().borders(Borders::ALL));
 
+    let right_text = if app.video_active {
+        "[Esc] Colgar"
+    } else {
+        "[G] Grupo  [F4] Video"
+    };
     let right = Paragraph::new(Line::from(vec![Span::styled(
-        "[G] Grupo  [F4] Video",
+        right_text,
         Style::default().fg(Color::White),
     )]))
     .style(Style::default().bg(COLOR_HEADER_BG))

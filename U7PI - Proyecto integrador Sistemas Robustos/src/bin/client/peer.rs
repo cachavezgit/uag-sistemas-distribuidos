@@ -167,6 +167,27 @@ pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChu
     Ok(())
 }
 
+/// Consume los frames JPEG que produce `video::start_capture` y los manda
+/// por RPC sobre una única conexión (igual que `send_file_to`, pero sin
+/// esperar acks por frame: la videollamada tolera perder algún frame,
+/// esperar ack por cada uno a 15 fps le agregaría latencia innecesaria).
+/// Termina solo cuando el canal se cierra (colgar la llamada detiene la
+/// captura, que a su vez cierra el canal).
+pub async fn stream_video_to(
+    ip: &str,
+    port: u16,
+    from: String,
+    mut frame_rx: mpsc::Receiver<Vec<u8>>,
+) -> anyhow::Result<()> {
+    let client = dial(ip, port).await?;
+
+    while let Some(jpeg) = frame_rx.recv().await {
+        let _ = client.send_video_frame(context::current(), from.clone(), jpeg).await;
+    }
+
+    Ok(())
+}
+
 pub async fn game_invite_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
     dial(ip, port)
         .await?

@@ -4,6 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui_explorer::FileExplorer;
@@ -38,16 +40,13 @@ pub enum ClientEvent {
     /// background, p. ej. una transferencia de archivo) que se agrega al
     /// historial de `target` como si lo mandara "Sistema".
     SystemMessage { target: String, content: String },
-    #[allow(dead_code)] // consumido a partir del commit de videollamada
     VideoFrame { from: String, jpeg: Vec<u8> },
     GameMove { from: String, position: u8 },
     GameInvite { from: String },
     GameAccept { from: String },
     DirectoryUpdated(Vec<NodeInfo>),
     GroupsUpdated(Vec<GroupInfo>),
-    #[allow(dead_code)] // consumido a partir del commit de videollamada
     VideoCallRequest { from: String },
-    #[allow(dead_code)]
     VideoCallAccepted { from: String },
 }
 
@@ -74,8 +73,11 @@ pub struct AppState {
     pub pending_game_invite_sent: Option<String>,
     /// Username que me invitó a jugar y todavía no acepté/rechacé.
     pub pending_game_invite: Option<String>,
-    #[allow(dead_code)] // usado a partir del commit de videollamada
     pub video_active: bool,
+    /// Some() mientras hay una videollamada en curso (enviando y/o recibiendo).
+    pub video_session: Option<VideoSession>,
+    /// Username que me invitó a una videollamada y todavía no acepté/rechacé.
+    pub pending_video_call_invite: Option<String>,
     pub should_quit: bool,
 }
 
@@ -103,6 +105,18 @@ pub struct GameState {
     pub my_symbol: char,
     pub opponent: String,
     pub my_turn: bool,
+}
+
+/// Estado de una videollamada activa. El reproductor en sí se guarda en
+/// `AppState.active_players` (mismo mecanismo que el autoplay de archivos
+/// recibidos) — acá solo se guarda su `stdin` para poder seguir
+/// escribiéndole los frames que van llegando.
+pub struct VideoSession {
+    pub peer: String,
+    pub stdin: Option<std::process::ChildStdin>,
+    /// Compartido con el hilo de captura (`video::start_capture`); ponerlo
+    /// en `true` le pide que se detenga al colgar.
+    pub stop_capture: Arc<AtomicBool>,
 }
 
 /// Estado del prompt inline de `[G]` — primero el nombre, luego el
@@ -140,6 +154,8 @@ impl AppState {
             pending_game_invite_sent: None,
             pending_game_invite: None,
             video_active: false,
+            video_session: None,
+            pending_video_call_invite: None,
             should_quit: false,
         };
         // Selecciona el primer contacto disponible, si hay alguno.
@@ -447,6 +463,79 @@ impl AppState {
         members.push(self.my_info.username.clone());
         Some(GroupInfo { name: gc.name, members })
     }
+
+    /// Registra una solicitud entrante de videollamada de `from` y
+    /// selecciona su chat para que el aviso "[A] Aceptar" sea visible.
+    pub fn receive_video_call_request(&mut self, from: String) {
+        self.record_message(
+            from.clone(),
+            "Sistema".to_string(),
+            format!("📹 {} quiere hacer videollamada. [A] para aceptar (con foco en Contactos).", from),
+        );
+        self.pending_video_call_invite = Some(from.clone());
+        self.selected_contact = Some(from);
+    }
+
+    /// Arranca (o reinicia) la sesión de videollamada con `peer` — llamado
+    /// tanto por quien acepta (apenas presiona `[A]`) como por quien invitó
+    /// (apenas le llega la confirmación `notify_video_call_accepted`).
+    /// Retorna la bandera de corte para que el llamador arranque la
+    /// captura/envío en background (`AppState` no conoce tokio/red).
+    pub fn start_video_call(&mut self, peer: String) -> Arc<AtomicBool> {
+        let stop = Arc::new(AtomicBool::new(false));
+        self.video_active = true;
+        self.record_message(peer.clone(), "Sistema".to_string(), format!("📹 Videollamada iniciada con {}.", peer));
+        self.video_session = Some(VideoSession { peer, stdin: None, stop_capture: stop.clone() });
+        stop
+    }
+
+    /// Aplica un frame de video recibido: abre el reproductor con el
+    /// primer frame (reutilizando `player::PlayerHandle::open_stream`,
+    /// igual que el streaming de archivos de video del U6) y le escribe
+    /// cada frame subsiguiente directo al `stdin`.
+    pub fn receive_video_frame(&mut self, from: String, jpeg: Vec<u8>) {
+        let matches_peer = self.video_session.as_ref().map(|s| s.peer == from).unwrap_or(false);
+        if !matches_peer {
+            return;
+        }
+
+        let needs_player = self.video_session.as_ref().is_some_and(|s| s.stdin.is_none());
+        if needs_player {
+            match PlayerHandle::open_stream() {
+                Ok((handle, stdin)) => {
+                    self.video_session.as_mut().unwrap().stdin = Some(stdin);
+                    self.active_players.push(handle);
+                }
+                Err(e) => {
+                    self.record_message(from, "Sistema".to_string(), format!("No se pudo abrir el reproductor de video: {}", e));
+                    return;
+                }
+            }
+        }
+
+        use std::io::Write;
+        let write_failed = match self.video_session.as_mut().and_then(|s| s.stdin.as_mut()) {
+            Some(stdin) => stdin.write_all(&jpeg).is_err(),
+            None => false,
+        };
+        if write_failed {
+            // El reproductor cerró el pipe (p. ej. el usuario cerró la ventana).
+            if let Some(session) = self.video_session.as_mut() {
+                session.stdin = None;
+            }
+        }
+    }
+
+    /// `[Esc]` con una llamada activa: detiene la captura local y limpia
+    /// el estado. El reproductor (si ya se abrió) se deja terminar solo al
+    /// cerrarse el pipe, igual que el streaming de video del U6.
+    pub fn end_video_call(&mut self) {
+        if let Some(session) = self.video_session.take() {
+            session.stop_capture.store(true, Ordering::Relaxed);
+            self.record_message(session.peer, "Sistema".to_string(), "📹 Videollamada finalizada.".to_string());
+        }
+        self.video_active = false;
+    }
 }
 
 pub fn timestamp_now() -> String {
@@ -619,5 +708,51 @@ mod tests {
 
         assert!(carlos.contact_keys().contains(&"Equipo".to_string()));
         assert!(carlos.chats["Equipo"].iter().any(|m| m.content == "hola equipo"));
+    }
+
+    #[test]
+    fn recibir_solicitud_de_videollamada_marca_pendiente_y_selecciona_contacto() {
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        carlos.receive_video_call_request("Ivan".to_string());
+
+        assert_eq!(carlos.pending_video_call_invite.as_deref(), Some("Ivan"));
+        assert_eq!(carlos.selected_contact.as_deref(), Some("Ivan"));
+        assert!(carlos.chats["Ivan"].iter().any(|m| m.content.contains("videollamada")));
+    }
+
+    #[test]
+    fn start_video_call_activa_sesion_y_bandera() {
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        assert!(!ivan.video_active);
+
+        let stop = ivan.start_video_call("Carlos".to_string());
+
+        assert!(ivan.video_active);
+        assert_eq!(ivan.video_session.as_ref().unwrap().peer, "Carlos");
+        assert!(!stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn end_video_call_detiene_captura_y_limpia_estado() {
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        let stop = ivan.start_video_call("Carlos".to_string());
+
+        ivan.end_video_call();
+
+        assert!(!ivan.video_active);
+        assert!(ivan.video_session.is_none());
+        assert!(stop.load(Ordering::Relaxed), "debe pedirle al hilo de captura que se detenga");
+        assert!(ivan.chats["Carlos"].iter().any(|m| m.content.contains("finalizada")));
+    }
+
+    #[test]
+    fn frame_de_video_de_otro_peer_se_ignora() {
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos"), node("Sofia")]);
+        ivan.start_video_call("Carlos".to_string());
+
+        // Un frame que dice venir de "Sofia" no debería tocar la sesión con Carlos.
+        ivan.receive_video_frame("Sofia".to_string(), vec![0u8, 1, 2]);
+
+        assert!(ivan.video_session.as_ref().unwrap().stdin.is_none());
     }
 }

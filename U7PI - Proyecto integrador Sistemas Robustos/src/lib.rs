@@ -11,6 +11,7 @@ pub mod game;
 pub mod player;
 pub mod proto;
 pub mod transfer;
+pub mod video;
 
 /// Clave Vigenère compartida por todos los nodos del chat.
 /// Fija por diseño: un chat multi-usuario no puede negociar una clave

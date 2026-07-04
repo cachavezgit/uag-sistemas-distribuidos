@@ -80,6 +80,26 @@ impl RegistryState {
         }
     }
 
+    /// Reenvía una llamada puntual (no un broadcast) al `PeerServiceClient`
+    /// cacheado de `to` — usado por `request_video_call`/`accept_video_call`
+    /// para notificar directamente al destinatario en vez de a todos.
+    async fn relay_to<F, E>(&self, to: &str, call: impl FnOnce(PeerServiceClient) -> F) -> Result<(), String>
+    where
+        F: std::future::Future<Output = Result<Result<(), String>, E>>,
+        E: std::fmt::Display,
+    {
+        let client = self.peer_clients.lock().unwrap().get(to).cloned();
+        let Some(client) = client else {
+            return Err(format!("{} no está conectado", to));
+        };
+
+        match tokio::time::timeout(std::time::Duration::from_secs(5), call(client)).await {
+            Ok(Ok(inner)) => inner,
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err(format!("{} no respondió a tiempo", to)),
+        }
+    }
+
     /// A diferencia de `broadcast_directory` (mismo snapshot para todos),
     /// cada nodo recibe solo los grupos de los que es miembro — así el
     /// panel GRUPOS de cada cliente no se llena con grupos ajenos.
@@ -148,12 +168,20 @@ impl RegistryService for RegistryServer {
         Ok(())
     }
 
-    async fn request_video_call(self, _: context::Context, _from: String, _to: String) -> Result<(), String> {
-        Err("request_video_call aún no implementado".to_string())
+    async fn request_video_call(self, _: context::Context, from: String, to: String) -> Result<(), String> {
+        self.state
+            .relay_to(&to, move |client| async move {
+                client.notify_video_call_request(context::current(), from).await
+            })
+            .await
     }
 
-    async fn accept_video_call(self, _: context::Context, _from: String, _to: String) -> Result<(), String> {
-        Err("accept_video_call aún no implementado".to_string())
+    async fn accept_video_call(self, _: context::Context, from: String, to: String) -> Result<(), String> {
+        self.state
+            .relay_to(&to, move |client| async move {
+                client.notify_video_call_accepted(context::current(), from).await
+            })
+            .await
     }
 
     async fn get_directory(self, _: context::Context) -> Result<Vec<NodeInfo>, String> {

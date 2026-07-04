@@ -67,8 +67,27 @@ fn parse_args() -> Args {
     Args { nombre, emoji }
 }
 
+/// Aviso no fatal si `mpv` no está instalado: la videollamada y la
+/// reproducción de video autoplay caen a `ffplay` si existe (ver
+/// `player::Player::detect`), o simplemente fallarán con un mensaje claro.
+fn advertir_si_falta_mpv() {
+    let tiene_mpv = std::process::Command::new("which")
+        .arg("mpv")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !tiene_mpv {
+        eprintln!("[Aviso] No se encontró 'mpv' en el sistema (probá `which mpv`).");
+        eprintln!("        La videollamada y la reproducción de video usarán 'ffplay' si está disponible.");
+        eprintln!("        Instalar con: brew install mpv (macOS) / sudo apt install mpv (Linux)\n");
+    }
+}
+
 fn main() {
     let args = parse_args();
+
+    advertir_si_falta_mpv();
 
     // Compuerta de autenticación: paso extra sobre lo pedido en el spec,
     // reutilizado de U6 (usuarios.json + lock de sesión). La identidad
@@ -164,13 +183,22 @@ async fn run_loop(
                 }
             } else if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
-                    handle_key(app, key.code);
+                    handle_key(app, key.code, &registry);
                 }
             }
         }
 
         while let Ok(event) = event_rx.try_recv() {
+            let es_frame_de_video = matches!(event, ClientEvent::VideoFrame { .. });
             handle_client_event(app, event);
+            if es_frame_de_video {
+                // Escribir al stdin del reproductor puede bloquear si el pipe
+                // se llena; procesar a lo sumo un frame por tick evita que
+                // una ráfaga de frames en cola tranque el resto del loop
+                // (teclado, otros eventos) — mismo fix que necesitó el
+                // streaming de archivos de video en el U6.
+                break;
+            }
         }
 
         app.sweep_finished_players();
@@ -206,12 +234,21 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::GameAccept { from } => app.start_game_as_inviter(from),
         ClientEvent::GameMove { from, position } => app.apply_remote_move(from, position),
         ClientEvent::GroupsUpdated(groups) => app.groups = groups,
-        // El resto de variantes se maneja a partir del commit de video.
-        _ => {}
+        ClientEvent::VideoFrame { from, jpeg } => app.receive_video_frame(from, jpeg),
+        ClientEvent::VideoCallRequest { from } => app.receive_video_call_request(from),
+        ClientEvent::VideoCallAccepted { from } => {
+            if let Some(node) = app.find_node(&from) {
+                let ip = node.ip.clone();
+                let port = node.port;
+                let my_username = app.my_info.username.clone();
+                let stop = app.start_video_call(from);
+                spawn_video_pipeline(ip, port, my_username, stop);
+            }
+        }
     }
 }
 
-fn handle_key(app: &mut AppState, code: KeyCode) {
+fn handle_key(app: &mut AppState, code: KeyCode, registry: &RegistryServiceClient) {
     if app.mode == AppMode::Game {
         handle_game_key(app, code);
         return;
@@ -222,6 +259,16 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
         return;
     }
 
+    if code == KeyCode::F(4) {
+        start_video_call_request(app, registry);
+        return;
+    }
+
+    if app.video_active && code == KeyCode::Esc {
+        app.end_video_call();
+        return;
+    }
+
     match app.focus {
         Focus::Contacts => match code {
             KeyCode::Up => app.select_prev(),
@@ -229,6 +276,9 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
             KeyCode::Tab => app.toggle_focus(),
             KeyCode::Char('a') | KeyCode::Char('A') if app.pending_game_invite.is_some() => {
                 accept_game_invite(app);
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if app.pending_video_call_invite.is_some() => {
+                accept_video_call(app, registry);
             }
             KeyCode::Char('g') | KeyCode::Char('G') => app.start_group_creation(),
             KeyCode::Char('q') => app.should_quit = true,
@@ -300,6 +350,61 @@ fn start_game_invite(app: &mut AppState) {
 
     tokio::spawn(async move {
         let _ = peer::game_invite_to(&ip, port, from).await;
+    });
+}
+
+/// `[F4]` — solicita una videollamada al contacto seleccionado vía el
+/// servidor de descubrimiento (`request_video_call`). No arranca la
+/// cámara todavía: eso pasa recién cuando llega `VideoCallAccepted`.
+fn start_video_call_request(app: &mut AppState, registry: &RegistryServiceClient) {
+    let Some(target) = app.selected_contact.clone() else { return };
+    if app.is_group(&target) {
+        app.record_message(
+            target,
+            "Sistema".to_string(),
+            "No se puede hacer videollamada a un grupo.".to_string(),
+        );
+        return;
+    }
+    if app.find_node(&target).is_none() {
+        return;
+    }
+
+    app.record_message(target.clone(), "Sistema".to_string(), format!("📹 Llamando a {}...", target));
+
+    let my_username = app.my_info.username.clone();
+    let registry = registry.clone();
+    tokio::spawn(async move {
+        let _ = registry.request_video_call(context::current(), my_username, target).await;
+    });
+}
+
+/// `[A]` — acepta la videollamada pendiente: arranca cámara+envío propios
+/// y avisa al peer que la invitó vía `accept_video_call`.
+fn accept_video_call(app: &mut AppState, registry: &RegistryServiceClient) {
+    let Some(from) = app.pending_video_call_invite.take() else { return };
+    let Some(node) = app.find_node(&from) else { return };
+    let ip = node.ip.clone();
+    let port = node.port;
+    let my_username = app.my_info.username.clone();
+
+    let stop = app.start_video_call(from.clone());
+    spawn_video_pipeline(ip, port, my_username.clone(), stop);
+
+    let registry = registry.clone();
+    tokio::spawn(async move {
+        let _ = registry.accept_video_call(context::current(), my_username, from).await;
+    });
+}
+
+/// Arranca la captura de cámara (`video::start_capture`, hilo dedicado) y
+/// una tarea que consume esos frames y los manda por RPC sobre una única
+/// conexión (`peer::stream_video_to`).
+fn spawn_video_pipeline(ip: String, port: u16, my_username: String, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(8);
+    gato_p2p::video::start_capture(frame_tx, stop);
+    tokio::spawn(async move {
+        let _ = peer::stream_video_to(&ip, port, my_username, frame_rx).await;
     });
 }
 
