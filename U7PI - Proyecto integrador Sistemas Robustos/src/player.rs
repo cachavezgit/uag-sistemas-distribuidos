@@ -135,6 +135,11 @@ impl PlayerHandle {
                     "--no-terminal",
                     "--demuxer=lavf",
                     "--demuxer-lavf-format=mjpeg",
+                    // probesize=32: libavformat solo necesita 3 bytes (FFD8FF) para
+                    // identificar JPEG; el default de 5 MB genera ~5 s de buffer.
+                    "--demuxer-lavf-probesize=32",
+                    // analyzeduration=0: salta el análisis de fps/bitrate del stream.
+                    "--demuxer-lavf-analyzeduration=0",
                     "--no-cache",
                     "--cache-pause=no",
                     "--framedrop=vo",
@@ -149,7 +154,15 @@ impl PlayerHandle {
                 .stderr(Stdio::null())
                 .spawn()?,
             Player::Ffplay(bin) => Command::new(bin)
-                .args(["-f", "mjpeg", "-i", "pipe:0", "-autoexit", "-loglevel", "quiet"])
+                .args([
+                    "-f", "mjpeg",
+                    "-probesize", "32",
+                    "-analyzeduration", "0",
+                    "-flags", "low_delay",
+                    "-framedrop",
+                    "-loglevel", "quiet",
+                    "-i", "pipe:0",
+                ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
