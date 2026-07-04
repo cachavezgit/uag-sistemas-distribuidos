@@ -11,6 +11,7 @@ pub mod game;
 pub mod player;
 pub mod proto;
 pub mod transfer;
+#[cfg(feature = "camera")]
 pub mod video;
 
 /// Clave Vigenère compartida por todos los nodos del chat.

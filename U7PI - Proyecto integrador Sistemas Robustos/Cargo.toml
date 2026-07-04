@@ -33,6 +33,13 @@ anyhow = "1.0"
 base64 = "0.22"
 ratatui-explorer = "0.2"
 
-# Videollamada: captura de cámara + codificación de frames
-nokhwa = { version = "0.10", features = ["input-native"] }
-image = "0.25"
+# Videollamada: captura de cámara + codificación de frames.
+# Opcional: en sistemas sin libclang (p.ej. Raspberry Pi sin dev tools)
+# compilar sin este feature para solo recibir/reproducir video vía mpv.
+# Con cámara:    cargo build --features camera
+# Sin cámara:    cargo build               (default)
+nokhwa = { version = "0.10", features = ["input-native"], optional = true }
+image = { version = "0.25", optional = true }
+
+[features]
+camera = ["dep:nokhwa", "dep:image"]

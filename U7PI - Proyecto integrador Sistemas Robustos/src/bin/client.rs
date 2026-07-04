@@ -458,12 +458,22 @@ fn accept_video_call(app: &mut AppState, registry: &RegistryServiceClient) {
 /// Arranca la captura de cámara (`video::start_capture`, hilo dedicado) y
 /// una tarea que consume esos frames y los manda por RPC sobre una única
 /// conexión (`peer::stream_video_to`).
+/// Sin el feature `camera` (compilación por defecto en Linux/ARM), esta
+/// función es un no-op: el nodo puede recibir y reproducir video vía mpv
+/// pero no captura ni envía frames propios.
 fn spawn_video_pipeline(ip: String, port: u16, my_username: String, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(8);
-    gato_p2p::video::start_capture(frame_tx, stop);
-    tokio::spawn(async move {
-        let _ = peer::stream_video_to(&ip, port, my_username, frame_rx).await;
-    });
+    #[cfg(feature = "camera")]
+    {
+        let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(8);
+        gato_p2p::video::start_capture(frame_tx, stop);
+        tokio::spawn(async move {
+            let _ = peer::stream_video_to(&ip, port, my_username, frame_rx).await;
+        });
+    }
+    #[cfg(not(feature = "camera"))]
+    {
+        let _ = (ip, port, my_username, stop);
+    }
 }
 
 /// Teclado durante el prompt inline de `[G]` — primero el nombre del

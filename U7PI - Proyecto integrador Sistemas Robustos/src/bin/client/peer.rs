@@ -173,6 +173,7 @@ pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChu
 /// esperar ack por cada uno a 15 fps le agregaría latencia innecesaria).
 /// Termina solo cuando el canal se cierra (colgar la llamada detiene la
 /// captura, que a su vez cierra el canal).
+#[cfg_attr(not(feature = "camera"), allow(dead_code))]
 pub async fn stream_video_to(
     ip: &str,
     port: u16,
