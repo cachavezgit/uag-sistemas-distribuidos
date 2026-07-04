@@ -291,6 +291,7 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::GroupsUpdated(groups) => app.groups = groups,
         ClientEvent::VideoFrame { from, jpeg } => app.receive_video_frame(from, jpeg),
         ClientEvent::VideoCallRequest { from } => app.receive_video_call_request(from),
+        ClientEvent::VideoCallEnded => app.end_video_call(),
         ClientEvent::VideoCallAccepted { from } => {
             if let Some(node) = app.find_node(&from) {
                 let ip = node.ip.clone();
@@ -320,6 +321,18 @@ fn handle_key(app: &mut AppState, code: KeyCode, registry: &RegistryServiceClien
     }
 
     if app.video_active && code == KeyCode::Esc {
+        // Notificar al peer antes de limpiar el estado local
+        if let Some(session) = app.video_session.as_ref() {
+            let peer_name = session.peer.clone();
+            if let Some(node) = app.find_node(&peer_name) {
+                let ip = node.ip.clone();
+                let port = node.port;
+                let from = app.my_info.username.clone();
+                tokio::spawn(async move {
+                    let _ = peer::notify_video_call_ended_to(&ip, port, from).await;
+                });
+            }
+        }
         app.end_video_call();
         return;
     }

@@ -86,6 +86,10 @@ impl PeerService for PeerServer {
     async fn notify_video_call_accepted(self, _: context::Context, from: String) -> Result<(), String> {
         self.emit(ClientEvent::VideoCallAccepted { from }).await
     }
+
+    async fn notify_video_call_ended(self, _: context::Context, _from: String) -> Result<(), String> {
+        self.emit(ClientEvent::VideoCallEnded).await
+    }
 }
 
 /// Bindea un puerto local libre, levanta el listener PeerService en
@@ -187,6 +191,14 @@ pub async fn stream_video_to(
     }
 
     Ok(())
+}
+
+pub async fn notify_video_call_ended_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .notify_video_call_ended(context::current(), from)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 pub async fn game_invite_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {

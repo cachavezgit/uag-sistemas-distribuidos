@@ -61,4 +61,5 @@ pub trait PeerService {
     async fn notify_groups(groups: Vec<GroupInfo>) -> Result<(), String>;
     async fn notify_video_call_request(from: String) -> Result<(), String>;
     async fn notify_video_call_accepted(from: String) -> Result<(), String>;
+    async fn notify_video_call_ended(from: String) -> Result<(), String>;
 }

@@ -44,6 +44,7 @@ pub enum ClientEvent {
     GroupsUpdated(Vec<GroupInfo>),
     VideoCallRequest { from: String },
     VideoCallAccepted { from: String },
+    VideoCallEnded,
 }
 
 pub struct AppState {
