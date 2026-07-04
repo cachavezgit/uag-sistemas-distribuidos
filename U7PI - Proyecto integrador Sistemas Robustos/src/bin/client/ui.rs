@@ -205,7 +205,11 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &AppState) {
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Mostrar siempre los mensajes más recientes: si hay más líneas que
+    // espacio vertical disponible, descartar las más antiguas.
+    let visible_height = inner.height as usize;
+    let skip = lines.len().saturating_sub(visible_height);
+    frame.render_widget(Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()), inner);
 }
 
 /// Tablero de gato embebido — reemplaza el panel de chat en `AppMode::Game`.
