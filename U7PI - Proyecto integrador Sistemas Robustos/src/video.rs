@@ -13,14 +13,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use image::codecs::jpeg::JpegEncoder;
+use image::imageops;
 use image::ExtendedColorType;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::Camera;
 use tokio::sync::mpsc;
 
-const JPEG_QUALITY: u8 = 50;
+const JPEG_QUALITY: u8 = 20;
 const FRAME_INTERVAL: Duration = Duration::from_millis(66); // ~15 fps
+const STREAM_WIDTH: u32 = 640;
+const STREAM_HEIGHT: u32 = 360;
 
 /// Arranca la captura de la cámara por defecto en un hilo dedicado (nokhwa
 /// es bloqueante) y manda cada frame codificado en JPEG por `frame_tx`.
@@ -81,18 +84,16 @@ pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>, cam
                 continue;
             };
 
-            let width = decoded.width();
-            let height = decoded.height();
-            // nokhwa puede devolver un ImageBuffer con stride padding
-            // (bytes extra por fila) cuando el driver V4L2 o la cámara virtual
-            // usa alineación interna. JpegEncoder exige exactamente width*height*3
-            // bytes — extraemos los pixels en un buffer packed para garantizarlo.
-            let packed: Vec<u8> = decoded.pixels().flat_map(|p| p.0).collect();
+            // Escalar a resolución de transmisión: reduce 4× los pixels y el
+            // tamaño del frame JPEG, compensando la ineficiencia de JSON para
+            // datos binarios (~4× overhead al serializar Vec<u8> como array).
+            let small = imageops::resize(&decoded, STREAM_WIDTH, STREAM_HEIGHT, imageops::FilterType::Nearest);
+            let packed: Vec<u8> = small.pixels().flat_map(|p| p.0).collect();
 
             let mut jpeg_buf = Vec::new();
             let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, JPEG_QUALITY);
             if encoder
-                .encode(&packed, width, height, ExtendedColorType::Rgb8)
+                .encode(&packed, STREAM_WIDTH, STREAM_HEIGHT, ExtendedColorType::Rgb8)
                 .is_err()
             {
                 continue;
