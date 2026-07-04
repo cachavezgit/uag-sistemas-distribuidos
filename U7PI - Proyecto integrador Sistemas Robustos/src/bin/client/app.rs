@@ -27,11 +27,7 @@ pub fn is_video_file(file_name: &str) -> bool {
 }
 
 /// Eventos que el `PeerService` propio (ver `client/peer.rs`) empuja hacia
-/// el loop principal de la TUI a través de un canal `mpsc`. Se declaran
-/// todas las variantes desde el commit 4 aunque el loop todavía solo
-/// consuma `DirectMessage`/`DirectoryUpdated` — así los commits
-/// siguientes (archivos, gato, grupos, video) solo agregan un `match`
-/// arm nuevo en `client.rs` en vez de tocar `peer.rs` cada vez.
+/// el loop principal de la TUI a través de un canal `mpsc`.
 pub enum ClientEvent {
     DirectMessage { from: String, content: String },
     GroupMessage { from: String, group: String, content: String },
@@ -52,7 +48,7 @@ pub enum ClientEvent {
 
 pub struct AppState {
     pub my_info: NodeInfo,
-    pub directory: Vec<NodeInfo>, // actualizado por push del servidor a partir del commit 4
+    pub directory: Vec<NodeInfo>, // actualizado en tiempo real por push del servidor
     pub groups: Vec<GroupInfo>,
     pub selected_contact: Option<String>, // username o nombre de grupo
     pub chats: HashMap<String, Vec<ChatMessage>>, // historial por contacto/grupo

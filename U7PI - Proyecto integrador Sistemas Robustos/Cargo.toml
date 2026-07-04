@@ -36,4 +36,3 @@ ratatui-explorer = "0.2"
 # Videollamada: captura de cámara + codificación de frames
 nokhwa = { version = "0.10", features = ["input-native"] }
 image = "0.25"
-tokio-util = { version = "0.7", features = ["codec"] }

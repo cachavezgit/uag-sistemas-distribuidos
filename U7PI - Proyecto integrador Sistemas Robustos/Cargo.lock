@@ -788,7 +788,6 @@ dependencies = [
  "tarpc",
  "tokio",
  "tokio-serde",
- "tokio-util",
 ]
 
 [[package]]

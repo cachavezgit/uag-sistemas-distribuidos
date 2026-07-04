@@ -1,10 +1,10 @@
 // ─────────────────────────────────────────────────────────
 // bin/client.rs — Cliente de chat P2P (entry point)
 //
-// Etapa 4: levanta el PeerService propio ANTES de registrarse (así el
-// servidor puede conectarse de vuelta para el push, ver proto.rs),
-// se registra, y corre la TUI con directorio en tiempo real y chat
-// individual P2P real (send_message).
+// Levanta el PeerService propio ANTES de registrarse (así el servidor
+// puede conectarse de vuelta para el push, ver proto.rs), se registra,
+// y corre la TUI: chat individual y grupal, transferencia de archivos,
+// gato embebido y videollamada.
 // ─────────────────────────────────────────────────────────
 
 #[path = "client/app.rs"]
@@ -463,7 +463,7 @@ fn open_file_explorer(app: &mut AppState) {
         app.record_message(
             target,
             "Sistema".to_string(),
-            "Enviar archivos a un grupo llega en un commit posterior.".to_string(),
+            "Enviar archivos a un grupo no está soportado.".to_string(),
         );
         return;
     }
