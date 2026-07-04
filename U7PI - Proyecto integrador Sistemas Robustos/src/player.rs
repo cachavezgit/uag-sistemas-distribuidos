@@ -138,6 +138,9 @@ impl PlayerHandle {
                     "--no-cache",
                     "--cache-pause=no",
                     "--framedrop=vo",
+                    "--stream-buffer-size=4096",
+                    "--demuxer-readahead-secs=0",
+                    "--demuxer-max-bytes=131072",
                     &format!("--input-ipc-server={}", socket_path),
                     "-",
                 ])
