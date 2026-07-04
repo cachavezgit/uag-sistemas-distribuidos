@@ -45,6 +45,9 @@ pub enum ClientEvent {
     VideoCallRequest { from: String },
     VideoCallAccepted { from: String },
     VideoCallEnded,
+    FileOffer { from: String, file_name: String },
+    FileAccepted,
+    FileRejected,
 }
 
 pub struct AppState {
@@ -76,6 +79,10 @@ pub struct AppState {
     pub video_session: Option<VideoSession>,
     /// Username que me invitó a una videollamada y todavía no acepté/rechacé.
     pub pending_video_call_invite: Option<String>,
+    /// Oferta de archivo entrante pendiente de respuesta (receptor).
+    pub pending_file_offer: Option<PendingFileOffer>,
+    /// Canal para notificar al task de envío que el receptor aceptó (emisor).
+    pub pending_file_send: Option<tokio::sync::oneshot::Sender<()>>,
     pub should_quit: bool,
 }
 
@@ -118,6 +125,12 @@ pub struct VideoSession {
     pub stop_capture: Arc<AtomicBool>,
 }
 
+/// Oferta de archivo pendiente de aceptar/rechazar (receptor).
+pub struct PendingFileOffer {
+    pub from: String,
+    pub file_name: String,
+}
+
 /// Estado del prompt inline de `[G]` — primero el nombre, luego el
 /// checklist de contactos conectados con `[Espacio]` para marcar.
 pub struct GroupCreationState {
@@ -156,6 +169,8 @@ impl AppState {
             video_active: false,
             video_session: None,
             pending_video_call_invite: None,
+            pending_file_offer: None,
+            pending_file_send: None,
             should_quit: false,
         };
         // Selecciona el primer contacto disponible, si hay alguno.
@@ -462,6 +477,18 @@ impl AppState {
         let mut members: Vec<String> = gc.selected.into_iter().collect();
         members.push(self.my_info.username.clone());
         Some(GroupInfo { name: gc.name, members })
+    }
+
+    /// Registra una oferta de archivo de `from` y selecciona su chat
+    /// para que el aviso "[A]/[R]" sea visible de inmediato.
+    pub fn receive_file_offer(&mut self, from: String, file_name: String) {
+        self.record_message(
+            from.clone(),
+            "Sistema".to_string(),
+            format!("📎 {} quiere enviarte '{}'. [A] Aceptar  [R] Rechazar (foco Contactos).", from, file_name),
+        );
+        self.pending_file_offer = Some(PendingFileOffer { from: from.clone(), file_name });
+        self.selected_contact = Some(from);
     }
 
     /// Registra una solicitud entrante de videollamada de `from` y

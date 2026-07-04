@@ -62,4 +62,8 @@ pub trait PeerService {
     async fn notify_video_call_request(from: String) -> Result<(), String>;
     async fn notify_video_call_accepted(from: String) -> Result<(), String>;
     async fn notify_video_call_ended(from: String) -> Result<(), String>;
+    // Handshake de transferencia de archivos (P2P directo)
+    async fn notify_file_offer(from: String, file_name: String) -> Result<(), String>;
+    async fn notify_file_accepted(from: String) -> Result<(), String>;
+    async fn notify_file_rejected(from: String) -> Result<(), String>;
 }

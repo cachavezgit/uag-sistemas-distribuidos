@@ -292,6 +292,16 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::VideoFrame { from, jpeg } => app.receive_video_frame(from, jpeg),
         ClientEvent::VideoCallRequest { from } => app.receive_video_call_request(from),
         ClientEvent::VideoCallEnded => app.end_video_call(),
+        ClientEvent::FileOffer { from, file_name } => app.receive_file_offer(from, file_name),
+        ClientEvent::FileAccepted => {
+            if let Some(tx) = app.pending_file_send.take() {
+                let _ = tx.send(());
+            }
+        }
+        ClientEvent::FileRejected => {
+            // Soltar el Sender hace que el task de envío reciba Err y muestre el aviso.
+            app.pending_file_send = None;
+        }
         ClientEvent::VideoCallAccepted { from } => {
             if let Some(node) = app.find_node(&from) {
                 let ip = node.ip.clone();
@@ -353,6 +363,12 @@ fn handle_key(app: &mut AppState, code: KeyCode, registry: &RegistryServiceClien
             }
             KeyCode::Char('a') | KeyCode::Char('A') if app.pending_video_call_invite.is_some() => {
                 accept_video_call(app, registry);
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if app.pending_file_offer.is_some() => {
+                accept_file_offer(app);
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') if app.pending_file_offer.is_some() => {
+                reject_file_offer(app);
             }
             KeyCode::Char('g') | KeyCode::Char('G') => app.start_group_creation(),
             KeyCode::Char('q') => app.should_quit = true,
@@ -600,12 +616,15 @@ fn handle_explorer_event(app: &mut AppState, ev: &Event, event_tx: &mpsc::Sender
     }
 }
 
-/// Fragmenta+cifra el archivo (reutilizando `transfer.rs`/`crypto.rs` con
-/// la clave fija del proyecto) y lo envía por P2P en background; el
-/// resultado (éxito o error) se reporta como `SystemMessage` en el chat
-/// del contacto seleccionado.
+/// Fragmenta+cifra el archivo, envía una oferta al receptor y espera que
+/// acepte antes de mandar los chunks. Si rechaza (o el canal se cierra),
+/// reporta el rechazo sin enviar nada.
 fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<ClientEvent>) {
     let Some(target) = app.selected_contact.clone() else { return };
+    if app.is_group(&target) {
+        app.record_message(target, "Sistema".to_string(), "Enviar archivos a un grupo no está soportado.".to_string());
+        return;
+    }
     let Some(node) = app.find_node(&target) else { return };
 
     let ip = node.ip.clone();
@@ -616,18 +635,77 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
 
-    app.record_message(target.clone(), "Sistema".to_string(), format!("📎 Enviando {}...", file_name));
+    // Fragmentar antes de pedir aceptación: si el archivo no existe o no
+    // tiene permisos, lo detectamos aquí sin molestar al receptor.
+    let chunks = match gato_p2p::transfer::fragment_and_encrypt(&path, gato_p2p::CLAVE_VIGENERE) {
+        Ok(c) => c,
+        Err(e) => {
+            app.record_message(target, "Sistema".to_string(), format!("❌ No se pudo leer {}: {}", file_name, e));
+            return;
+        }
+    };
+
+    if app.pending_file_send.is_some() {
+        app.record_message(target, "Sistema".to_string(), "Ya hay una transferencia pendiente de aceptación.".to_string());
+        return;
+    }
+
+    let (accept_tx, accept_rx) = tokio::sync::oneshot::channel::<()>();
+    app.pending_file_send = Some(accept_tx);
+    app.record_message(target.clone(), "Sistema".to_string(), format!("📎 Ofreciendo '{}' a {}...", file_name, target));
 
     tokio::spawn(async move {
-        let result = match gato_p2p::transfer::fragment_and_encrypt(&path, gato_p2p::CLAVE_VIGENERE) {
-            Ok(chunks) => peer::send_file_to(&ip, port, from, chunks).await,
-            Err(e) => Err(e),
-        };
-        let content = match result {
+        if let Err(e) = peer::notify_file_offer_to(&ip, port, from.clone(), file_name.clone()).await {
+            let _ = event_tx.send(ClientEvent::SystemMessage {
+                target,
+                content: format!("❌ No se pudo enviar la oferta: {}", e),
+            }).await;
+            return;
+        }
+
+        if accept_rx.await.is_err() {
+            let _ = event_tx.send(ClientEvent::SystemMessage {
+                content: format!("📎 {} rechazó recibir '{}'.", target, file_name),
+                target,
+            }).await;
+            return;
+        }
+
+        let content = match peer::send_file_to(&ip, port, from, chunks).await {
             Ok(()) => format!("✅ {} enviado", file_name),
             Err(e) => format!("❌ Error enviando {}: {}", file_name, e),
         };
         let _ = event_tx.send(ClientEvent::SystemMessage { target, content }).await;
+    });
+}
+
+/// `[A]` con una oferta de archivo pendiente: acepta y avisa al emisor.
+fn accept_file_offer(app: &mut AppState) {
+    let Some(offer) = app.pending_file_offer.take() else { return };
+    let Some(node) = app.find_node(&offer.from) else { return };
+    let ip = node.ip.clone();
+    let port = node.port;
+    let my_username = app.my_info.username.clone();
+
+    app.record_message(offer.from.clone(), "Sistema".to_string(), format!("📎 Aceptaste recibir '{}'.", offer.file_name));
+
+    tokio::spawn(async move {
+        let _ = peer::notify_file_accepted_to(&ip, port, my_username).await;
+    });
+}
+
+/// `[R]` con una oferta de archivo pendiente: rechaza y avisa al emisor.
+fn reject_file_offer(app: &mut AppState) {
+    let Some(offer) = app.pending_file_offer.take() else { return };
+    let Some(node) = app.find_node(&offer.from) else { return };
+    let ip = node.ip.clone();
+    let port = node.port;
+    let my_username = app.my_info.username.clone();
+
+    app.record_message(offer.from.clone(), "Sistema".to_string(), format!("📎 Rechazaste recibir '{}'.", offer.file_name));
+
+    tokio::spawn(async move {
+        let _ = peer::notify_file_rejected_to(&ip, port, my_username).await;
     });
 }
 

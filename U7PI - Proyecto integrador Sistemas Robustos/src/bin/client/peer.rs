@@ -90,6 +90,18 @@ impl PeerService for PeerServer {
     async fn notify_video_call_ended(self, _: context::Context, _from: String) -> Result<(), String> {
         self.emit(ClientEvent::VideoCallEnded).await
     }
+
+    async fn notify_file_offer(self, _: context::Context, from: String, file_name: String) -> Result<(), String> {
+        self.emit(ClientEvent::FileOffer { from, file_name }).await
+    }
+
+    async fn notify_file_accepted(self, _: context::Context, _from: String) -> Result<(), String> {
+        self.emit(ClientEvent::FileAccepted).await
+    }
+
+    async fn notify_file_rejected(self, _: context::Context, _from: String) -> Result<(), String> {
+        self.emit(ClientEvent::FileRejected).await
+    }
 }
 
 /// Bindea un puerto local libre, levanta el listener PeerService en
@@ -191,6 +203,30 @@ pub async fn stream_video_to(
     }
 
     Ok(())
+}
+
+pub async fn notify_file_offer_to(ip: &str, port: u16, from: String, file_name: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .notify_file_offer(context::current(), from, file_name)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+pub async fn notify_file_accepted_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .notify_file_accepted(context::current(), from)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+pub async fn notify_file_rejected_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .notify_file_rejected(context::current(), from)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 pub async fn notify_video_call_ended_to(ip: &str, port: u16, from: String) -> anyhow::Result<()> {
