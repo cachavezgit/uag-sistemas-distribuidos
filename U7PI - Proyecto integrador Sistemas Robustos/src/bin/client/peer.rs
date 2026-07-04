@@ -136,6 +136,20 @@ pub async fn send_message_to(ip: &str, port: u16, from: String, content: String)
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+pub async fn send_group_message_to(
+    ip: &str,
+    port: u16,
+    from: String,
+    group: String,
+    content: String,
+) -> anyhow::Result<()> {
+    dial(ip, port)
+        .await?
+        .send_group_message(context::current(), from, group, content)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// Envía todos los chunks de un archivo ya fragmentado/cifrado
 /// (`transfer::fragment_and_encrypt`) a un peer, sobre una única conexión,
 /// esperando el ack de cada chunk antes de mandar el siguiente (igual que

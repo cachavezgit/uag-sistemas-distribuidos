@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{AppMode, AppState, Focus};
+use super::app::{AppMode, AppState, Focus, GroupCreationStep};
 
 const COLOR_HEADER_BG: Color = Color::Rgb(31, 56, 100);
 const COLOR_SELECTED: Color = Color::Blue;
@@ -48,6 +48,12 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         let area = centered_rect(70, 75, frame.area());
         frame.render_widget(Clear, area);
         frame.render_widget_ref(explorer.widget(), area);
+    }
+
+    if app.group_creation.is_some() {
+        let area = centered_rect(50, 60, frame.area());
+        frame.render_widget(Clear, area);
+        render_group_creation(frame, area, app);
     }
 }
 
@@ -236,6 +242,48 @@ fn render_game(frame: &mut Frame, area: Rect, app: &AppState) {
             .alignment(Alignment::Center),
         rows[3],
     );
+}
+
+/// Overlay del prompt inline de `[G]`: primero el nombre del grupo, luego
+/// el checklist de contactos con `[Espacio]` para marcar miembros.
+fn render_group_creation(frame: &mut Frame, area: Rect, app: &AppState) {
+    let Some(gc) = &app.group_creation else { return };
+
+    match gc.step {
+        GroupCreationStep::NamingGroup => {
+            let block = Block::default().borders(Borders::ALL).title(" Nombre del grupo ");
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(
+                Paragraph::new(format!("{}_", gc.name)).alignment(Alignment::Center),
+                inner,
+            );
+        }
+        GroupCreationStep::SelectingMembers => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Miembros de \"{}\" — [Espacio] marcar, [Enter] crear ", gc.name));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let items: Vec<ListItem> = gc
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(i, username)| {
+                    let marca = if gc.selected.contains(username) { "[x]" } else { "[ ]" };
+                    let style = if i == gc.cursor {
+                        Style::default().bg(COLOR_SELECTED).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(format!("{} {}", marca, username))).style(style)
+                })
+                .collect();
+
+            frame.render_widget(List::new(items), inner);
+        }
+    }
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &AppState) {

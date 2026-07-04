@@ -124,7 +124,7 @@ async fn iniciar(args: Args) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal, &mut app, event_rx, event_tx).await;
+    let result = run_loop(&mut terminal, &mut app, event_rx, event_tx, registry.clone()).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -143,6 +143,7 @@ async fn run_loop(
     app: &mut AppState,
     mut event_rx: mpsc::Receiver<ClientEvent>,
     event_tx: mpsc::Sender<ClientEvent>,
+    registry: RegistryServiceClient,
 ) -> anyhow::Result<()> {
     let mut last_tick = Instant::now();
 
@@ -155,6 +156,12 @@ async fn run_loop(
             let ev = event::read()?;
             if app.file_explorer.is_some() {
                 handle_explorer_event(app, &ev, &event_tx);
+            } else if app.group_creation.is_some() {
+                if let Event::Key(key) = ev {
+                    if key.kind == KeyEventKind::Press {
+                        handle_group_creation_key(app, key.code, &registry);
+                    }
+                }
             } else if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
                     handle_key(app, key.code);
@@ -198,8 +205,8 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         ClientEvent::GameInvite { from } => app.receive_game_invite(from),
         ClientEvent::GameAccept { from } => app.start_game_as_inviter(from),
         ClientEvent::GameMove { from, position } => app.apply_remote_move(from, position),
-        // El resto de variantes se maneja a partir de sus commits
-        // correspondientes (grupos, video).
+        ClientEvent::GroupsUpdated(groups) => app.groups = groups,
+        // El resto de variantes se maneja a partir del commit de video.
         _ => {}
     }
 }
@@ -223,6 +230,7 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
             KeyCode::Char('a') | KeyCode::Char('A') if app.pending_game_invite.is_some() => {
                 accept_game_invite(app);
             }
+            KeyCode::Char('g') | KeyCode::Char('G') => app.start_group_creation(),
             KeyCode::Char('q') => app.should_quit = true,
             KeyCode::Esc => app.should_quit = true,
             _ => {}
@@ -295,8 +303,55 @@ fn start_game_invite(app: &mut AppState) {
     });
 }
 
+/// Teclado durante el prompt inline de `[G]` — primero el nombre del
+/// grupo, luego el checklist de contactos con `[Espacio]` para marcar.
+fn handle_group_creation_key(app: &mut AppState, code: KeyCode, registry: &RegistryServiceClient) {
+    use app::GroupCreationStep;
+
+    let Some(step) = app.group_creation.as_ref().map(|gc| &gc.step) else { return };
+
+    match step {
+        GroupCreationStep::NamingGroup => match code {
+            KeyCode::Esc => app.group_creation = None,
+            KeyCode::Enter => {
+                if let Some(gc) = app.group_creation.as_mut() {
+                    if !gc.name.trim().is_empty() {
+                        gc.step = GroupCreationStep::SelectingMembers;
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(gc) = app.group_creation.as_mut() {
+                    gc.name.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(gc) = app.group_creation.as_mut() {
+                    gc.name.push(c);
+                }
+            }
+            _ => {}
+        },
+        GroupCreationStep::SelectingMembers => match code {
+            KeyCode::Esc => app.group_creation = None,
+            KeyCode::Up => app.group_creation_move(-1),
+            KeyCode::Down => app.group_creation_move(1),
+            KeyCode::Char(' ') => app.group_creation_toggle_current(),
+            KeyCode::Enter => {
+                if let Some(group) = app.finish_group_creation() {
+                    let registry = registry.clone();
+                    tokio::spawn(async move {
+                        let _ = registry.create_group(context::current(), group).await;
+                    });
+                }
+            }
+            _ => {}
+        },
+    }
+}
+
 /// `[F2]` — abre el explorador de archivos para adjuntar uno al contacto
-/// seleccionado. El envío grupal (fan-out) llega en el commit de grupos.
+/// seleccionado. El envío grupal de archivos queda fuera de alcance.
 fn open_file_explorer(app: &mut AppState) {
     let Some(target) = app.selected_contact.clone() else { return };
     if app.is_group(&target) {
@@ -379,8 +434,8 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
 }
 
 /// Procesa el buffer de entrada (traduce `/e `), lo agrega al historial
-/// local y lo envía por P2P real al contacto seleccionado. El envío
-/// grupal (fan-out a cada miembro) se conecta en el commit de grupos.
+/// local y lo envía por P2P real al contacto (o a cada miembro del grupo)
+/// seleccionado.
 fn submit_message(app: &mut AppState) {
     if app.input_buffer.trim().is_empty() {
         return;
@@ -398,7 +453,8 @@ fn submit_message(app: &mut AppState) {
     app.record_message(target.clone(), app.my_info.username.clone(), content.clone());
 
     if app.is_group(&target) {
-        return; // fan-out a miembros: commit de grupos
+        send_group_message(app, &target, content);
+        return;
     }
 
     if let Some(node) = app.find_node(&target) {
@@ -407,6 +463,25 @@ fn submit_message(app: &mut AppState) {
         let from = app.my_info.username.clone();
         tokio::spawn(async move {
             let _ = peer::send_message_to(&ip, port, from, content).await;
+        });
+    }
+}
+
+/// Fan-out: le manda `content` por P2P a cada miembro del grupo `group_name`
+/// (excepto a mí mismo), una conexión efímera por destinatario.
+fn send_group_message(app: &AppState, group_name: &str, content: String) {
+    let Some(group) = app.groups.iter().find(|g| g.name == group_name).cloned() else { return };
+    let my_username = app.my_info.username.clone();
+
+    for member in group.members.into_iter().filter(|m| *m != my_username) {
+        let Some(node) = app.find_node(&member) else { continue };
+        let ip = node.ip.clone();
+        let port = node.port;
+        let from = my_username.clone();
+        let group_name = group_name.to_string();
+        let content = content.clone();
+        tokio::spawn(async move {
+            let _ = peer::send_group_message_to(&ip, port, from, group_name, content).await;
         });
     }
 }

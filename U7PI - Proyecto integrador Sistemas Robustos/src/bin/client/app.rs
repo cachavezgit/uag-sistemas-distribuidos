@@ -2,7 +2,7 @@
 // client/app.rs — Estado de la aplicación TUI
 // ─────────────────────────────────────────────────────────
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,7 +32,6 @@ pub fn is_video_file(file_name: &str) -> bool {
 /// arm nuevo en `client.rs` en vez de tocar `peer.rs` cada vez.
 pub enum ClientEvent {
     DirectMessage { from: String, content: String },
-    #[allow(dead_code)] // consumido a partir del commit de grupos
     GroupMessage { from: String, group: String, content: String },
     FileChunkReceived { from: String, chunk: FileChunk },
     /// Mensaje de estado genérico (progreso/errores de una tarea en
@@ -45,7 +44,6 @@ pub enum ClientEvent {
     GameInvite { from: String },
     GameAccept { from: String },
     DirectoryUpdated(Vec<NodeInfo>),
-    #[allow(dead_code)] // consumido a partir del commit de grupos
     GroupsUpdated(Vec<GroupInfo>),
     #[allow(dead_code)] // consumido a partir del commit de videollamada
     VideoCallRequest { from: String },
@@ -63,6 +61,8 @@ pub struct AppState {
     pub mode: AppMode,
     pub focus: Focus,
     pub file_explorer: Option<FileExplorer>,
+    /// Some() mientras el prompt inline de creación de grupo está abierto.
+    pub group_creation: Option<GroupCreationState>,
     /// Chunks acumulados de una transferencia en curso, por (remitente, nombre de archivo).
     pub file_recv_buffers: HashMap<(String, String), Vec<FileChunk>>,
     /// Reproductores mpv/ffplay lanzados para archivos recibidos; se
@@ -105,6 +105,22 @@ pub struct GameState {
     pub my_turn: bool,
 }
 
+/// Estado del prompt inline de `[G]` — primero el nombre, luego el
+/// checklist de contactos conectados con `[Espacio]` para marcar.
+pub struct GroupCreationState {
+    pub step: GroupCreationStep,
+    pub name: String,
+    pub candidates: Vec<String>,
+    pub selected: HashSet<String>,
+    pub cursor: usize,
+}
+
+#[derive(PartialEq)]
+pub enum GroupCreationStep {
+    NamingGroup,
+    SelectingMembers,
+}
+
 impl AppState {
     pub fn new(my_info: NodeInfo, directory: Vec<NodeInfo>) -> Self {
         let mut app = AppState {
@@ -117,6 +133,7 @@ impl AppState {
             mode: AppMode::Chat,
             focus: Focus::Contacts,
             file_explorer: None,
+            group_creation: None,
             file_recv_buffers: HashMap::new(),
             active_players: Vec::new(),
             game_state: None,
@@ -378,6 +395,58 @@ impl AppState {
         self.mode = AppMode::Chat;
         self.record_message(opponent, "Sistema".to_string(), mensaje);
     }
+
+    /// `[G]` — abre el prompt inline de creación de grupo con los contactos
+    /// conectados como candidatos.
+    pub fn start_group_creation(&mut self) {
+        let candidates = self
+            .directory
+            .iter()
+            .filter(|n| n.username != self.my_info.username)
+            .map(|n| n.username.clone())
+            .collect();
+        self.group_creation = Some(GroupCreationState {
+            step: GroupCreationStep::NamingGroup,
+            name: String::new(),
+            candidates,
+            selected: HashSet::new(),
+            cursor: 0,
+        });
+    }
+
+    /// Mueve el cursor del checklist de miembros (con wraparound).
+    pub fn group_creation_move(&mut self, delta: isize) {
+        let Some(gc) = self.group_creation.as_mut() else { return };
+        if gc.candidates.is_empty() {
+            return;
+        }
+        let len = gc.candidates.len() as isize;
+        gc.cursor = (((gc.cursor as isize + delta) % len + len) % len) as usize;
+    }
+
+    /// `[Espacio]` — marca/desmarca el candidato bajo el cursor.
+    pub fn group_creation_toggle_current(&mut self) {
+        let Some(gc) = self.group_creation.as_mut() else { return };
+        let Some(username) = gc.candidates.get(gc.cursor) else { return };
+        if !gc.selected.remove(username) {
+            gc.selected.insert(username.clone());
+        }
+    }
+
+    /// `[Enter]` en el paso de selección de miembros: si el nombre y al
+    /// menos un miembro son válidos, cierra el prompt y retorna el
+    /// `GroupInfo` (con el creador incluido) para que el llamador dispare
+    /// `create_group` por RPC. Si no es válido, deja el prompt abierto.
+    pub fn finish_group_creation(&mut self) -> Option<GroupInfo> {
+        let gc = self.group_creation.as_ref()?;
+        if gc.name.trim().is_empty() || gc.selected.is_empty() {
+            return None;
+        }
+        let gc = self.group_creation.take().unwrap();
+        let mut members: Vec<String> = gc.selected.into_iter().collect();
+        members.push(self.my_info.username.clone());
+        Some(GroupInfo { name: gc.name, members })
+    }
 }
 
 pub fn timestamp_now() -> String {
@@ -479,5 +548,76 @@ mod tests {
         assert!(ivan.game_state.is_none());
         assert_eq!(ivan.mode, AppMode::Chat);
         assert!(ivan.chats["Carlos"].iter().any(|m| m.content.contains("Abandonaste")));
+    }
+
+    #[test]
+    fn crear_grupo_arma_group_info_con_creador_incluido() {
+        let mut ivan = AppState::new(
+            node("Ivan"),
+            vec![node("Ivan"), node("Carlos"), node("Sofia")],
+        );
+
+        ivan.start_group_creation();
+        assert_eq!(ivan.group_creation.as_ref().unwrap().candidates, vec!["Carlos", "Sofia"]);
+
+        // Escribe el nombre y confirma (simulando el teclado de client.rs)
+        for c in "Equipo".chars() {
+            ivan.group_creation.as_mut().unwrap().name.push(c);
+        }
+        ivan.group_creation.as_mut().unwrap().step = GroupCreationStep::SelectingMembers;
+
+        // Navega y marca a Carlos y Sofia
+        ivan.group_creation_toggle_current(); // Carlos (cursor=0)
+        ivan.group_creation_move(1);
+        ivan.group_creation_toggle_current(); // Sofia (cursor=1)
+
+        let group = ivan.finish_group_creation().expect("debe crear el grupo con 2 miembros marcados");
+        assert_eq!(group.name, "Equipo");
+
+        let mut members = group.members;
+        members.sort();
+        assert_eq!(members, vec!["Carlos", "Ivan", "Sofia"]);
+        assert!(ivan.group_creation.is_none());
+    }
+
+    #[test]
+    fn crear_grupo_sin_miembros_no_finaliza() {
+        let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos")]);
+        ivan.start_group_creation();
+        ivan.group_creation.as_mut().unwrap().name = "VacioClub".to_string();
+        ivan.group_creation.as_mut().unwrap().step = GroupCreationStep::SelectingMembers;
+
+        assert!(ivan.finish_group_creation().is_none());
+        assert!(ivan.group_creation.is_some(), "el prompt debe seguir abierto si no hay miembros marcados");
+    }
+
+    #[test]
+    fn group_creation_move_hace_wraparound() {
+        let mut ivan = AppState::new(
+            node("Ivan"),
+            vec![node("Ivan"), node("Carlos"), node("Sofia")],
+        );
+        ivan.start_group_creation();
+        assert_eq!(ivan.group_creation.as_ref().unwrap().cursor, 0);
+
+        ivan.group_creation_move(-1); // de 0 hacia atrás → último
+        assert_eq!(ivan.group_creation.as_ref().unwrap().cursor, 1);
+
+        ivan.group_creation_move(1);
+        assert_eq!(ivan.group_creation.as_ref().unwrap().cursor, 0);
+    }
+
+    #[test]
+    fn recibir_mensaje_de_grupo_usa_el_nombre_del_grupo_como_chat() {
+        let mut carlos = AppState::new(node("Carlos"), vec![node("Ivan"), node("Carlos")]);
+        carlos.groups.push(GroupInfo {
+            name: "Equipo".to_string(),
+            members: vec!["Ivan".to_string(), "Carlos".to_string()],
+        });
+
+        carlos.record_message("Equipo".to_string(), "Ivan".to_string(), "hola equipo".to_string());
+
+        assert!(carlos.contact_keys().contains(&"Equipo".to_string()));
+        assert!(carlos.chats["Equipo"].iter().any(|m| m.content == "hola equipo"));
     }
 }

@@ -26,7 +26,6 @@ const LISTEN_ADDR: &str = "0.0.0.0:9000";
 #[derive(Clone, Default)]
 struct RegistryState {
     nodes: Arc<Mutex<HashMap<String, NodeInfo>>>,
-    #[allow(dead_code)] // usado a partir del commit de grupos
     groups: Arc<Mutex<Vec<GroupInfo>>>,
     peer_clients: Arc<Mutex<HashMap<String, PeerServiceClient>>>,
 }
@@ -80,6 +79,24 @@ impl RegistryState {
             .await;
         }
     }
+
+    /// A diferencia de `broadcast_directory` (mismo snapshot para todos),
+    /// cada nodo recibe solo los grupos de los que es miembro — así el
+    /// panel GRUPOS de cada cliente no se llena con grupos ajenos.
+    async fn broadcast_groups(&self) {
+        let groups = self.groups.lock().unwrap().clone();
+        let targets: Vec<(String, PeerServiceClient)> =
+            self.peer_clients.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        for (username, client) in targets {
+            let mine: Vec<GroupInfo> = groups.iter().filter(|g| g.members.contains(&username)).cloned().collect();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                client.notify_groups(context::current(), mine),
+            )
+            .await;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -119,8 +136,16 @@ impl RegistryService for RegistryServer {
         Ok(())
     }
 
-    async fn create_group(self, _: context::Context, _group: GroupInfo) -> Result<(), String> {
-        Err("create_group aún no implementado".to_string())
+    async fn create_group(self, _: context::Context, group: GroupInfo) -> Result<(), String> {
+        println!("[Registry] Grupo '{}' creado con miembros {:?}", group.name, group.members);
+        self.state.groups.lock().unwrap().push(group);
+
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            state.broadcast_groups().await;
+        });
+
+        Ok(())
     }
 
     async fn request_video_call(self, _: context::Context, _from: String, _to: String) -> Result<(), String> {
