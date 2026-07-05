@@ -52,6 +52,8 @@ impl PeerService for PeerServer {
     }
 
     async fn send_file_chunk(self, _: context::Context, from: String, chunk: FileChunk) -> Result<(), String> {
+        eprintln!("[PEER] send_file_chunk handler: chunk {}/{} de '{}' desde '{}'",
+            chunk.chunk_index + 1, chunk.total_chunks, chunk.file_name, from);
         self.emit(ClientEvent::FileChunkReceived { from, chunk }).await
     }
 
@@ -171,13 +173,17 @@ pub async fn send_group_message_to(
 /// esperando el ack de cada chunk antes de mandar el siguiente (igual que
 /// `network::send_file_chunks` en el U6).
 pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChunk>) -> anyhow::Result<()> {
+    eprintln!("[SEND] send_file_to: {}:{} → {} chunks desde '{}'", ip, port, chunks.len(), from);
     let client = dial(ip, port).await?;
+    eprintln!("[SEND] Conexión establecida con {}:{}", ip, port);
 
     for chunk in chunks {
+        eprintln!("[SEND] Enviando chunk {}/{} de '{}'", chunk.chunk_index + 1, chunk.total_chunks, chunk.file_name);
         client
             .send_file_chunk(context::current(), from.clone(), chunk)
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("[SEND] Chunk enviado OK");
     }
 
     Ok(())

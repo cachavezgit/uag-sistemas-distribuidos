@@ -260,11 +260,15 @@ impl AppState {
         let is_last = chunk.chunk_index + 1 == chunk.total_chunks;
 
         // Diagnóstico: confirmar que el chunk llegó (se puede eliminar después).
-        self.record_message(
-            from.clone(),
-            "Sistema".to_string(),
-            format!("📦 Chunk {}/{} de '{}' recibido", chunk.chunk_index + 1, chunk.total_chunks, chunk.file_name),
-        );
+        let diag = format!("📦 Chunk {}/{} de '{}' recibido de '{}'",
+            chunk.chunk_index + 1, chunk.total_chunks, chunk.file_name, from);
+        self.record_message(from.clone(), "Sistema".to_string(), diag.clone());
+        // También mostrar en el chat activo si es diferente al remitente.
+        if let Some(sel) = self.selected_contact.clone() {
+            if sel != from {
+                self.record_message(sel, "Sistema".to_string(), diag);
+            }
+        }
 
         self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
 

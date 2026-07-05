@@ -650,6 +650,11 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
         }
     };
 
+    if chunks.is_empty() {
+        app.record_message(target, "Sistema".to_string(), format!("❌ '{}' está vacío, no hay nada que enviar.", file_name));
+        return;
+    }
+
     if app.pending_file_send.is_some() {
         app.record_message(target, "Sistema".to_string(), "Ya hay una transferencia pendiente de aceptación.".to_string());
         return;
