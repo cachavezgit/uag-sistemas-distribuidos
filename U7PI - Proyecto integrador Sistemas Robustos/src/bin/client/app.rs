@@ -258,13 +258,24 @@ impl AppState {
     pub fn receive_file_chunk(&mut self, from: String, chunk: FileChunk) {
         let key = (from.clone(), chunk.file_name.clone());
         let is_last = chunk.chunk_index + 1 == chunk.total_chunks;
+
+        // Diagnóstico: confirmar que el chunk llegó (se puede eliminar después).
+        self.record_message(
+            from.clone(),
+            "Sistema".to_string(),
+            format!("📦 Chunk {}/{} de '{}' recibido", chunk.chunk_index + 1, chunk.total_chunks, chunk.file_name),
+        );
+
         self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
 
         if !is_last {
             return;
         }
 
-        let Some(mut chunks) = self.file_recv_buffers.remove(&key) else { return };
+        let Some(mut chunks) = self.file_recv_buffers.remove(&key) else {
+            self.record_message(from.clone(), "Sistema".to_string(), "⚠️ Error interno: buffer no encontrado".to_string());
+            return;
+        };
         chunks.sort_by_key(|c| c.chunk_index);
         let file_name = key.1;
 
