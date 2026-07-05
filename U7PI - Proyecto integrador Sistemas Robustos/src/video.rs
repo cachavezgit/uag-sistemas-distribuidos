@@ -59,11 +59,31 @@ pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>, cam
             return;
         }
 
-        let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-        let mut camera = match Camera::new(CameraIndex::Index(camera_index), format) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[Video] No se pudo abrir la cámara: {}", e);
+        // Intentar el índice solicitado primero; si falla, probar 0-4 en orden
+        // para auto-detectar la primera cámara disponible sin requerir --camara.
+        let indices: Vec<u32> = std::iter::once(camera_index)
+            .chain((0u32..5).filter(|&i| i != camera_index))
+            .collect();
+
+        let mut camera = None;
+        for idx in indices {
+            let fmt = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+            match Camera::new(CameraIndex::Index(idx), fmt) {
+                Ok(c) => {
+                    if idx != camera_index {
+                        eprintln!("[Video] Cámara {} no disponible; usando índice {}.", camera_index, idx);
+                    }
+                    camera = Some(c);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        let mut camera = match camera {
+            Some(c) => c,
+            None => {
+                eprintln!("[Video] No se encontró ninguna cámara disponible (índices 0-4).");
                 return;
             }
         };
