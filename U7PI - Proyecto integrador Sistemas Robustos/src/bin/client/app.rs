@@ -260,7 +260,10 @@ impl AppState {
     /// streaming a mpv/ffplay desde el primer chunk (sin guardar en disco).
     /// Para otros archivos, acumula todos los chunks, reconstruye y guarda
     /// en `./recibidos/` al llegar el último.
-    pub fn receive_file_chunk(&mut self, from: String, chunk: FileChunk) {
+    ///
+    /// Retorna `Some(from)` si el reproductor se cerró mientras llegaban
+    /// chunks, para que el llamador notifique al emisor.
+    pub fn receive_file_chunk(&mut self, from: String, chunk: FileChunk) -> Option<String> {
         let file_name = chunk.file_name.clone();
         let key = (from.clone(), file_name.clone());
         let is_last = chunk.chunk_index + 1 == chunk.total_chunks;
@@ -298,7 +301,7 @@ impl AppState {
                             "Sistema".to_string(),
                             format!("❌ No se pudo abrir el reproductor para '{}': {}", file_name, e),
                         );
-                        return;
+                        return None;
                     }
                 }
             }
@@ -307,7 +310,17 @@ impl AppState {
             match gato_p2p::transfer::decrypt_single_chunk(chunk.data, gato_p2p::CLAVE_VIGENERE) {
                 Ok(raw) => {
                     if let Some(tx) = self.video_stream_senders.get(&key) {
-                        let _ = tx.send(raw);
+                        if tx.send(raw).is_err() {
+                            // El hilo escritor murió: mpv se cerró antes de
+                            // recibir todos los chunks.
+                            self.video_stream_senders.remove(&key);
+                            self.record_message(
+                                from.clone(),
+                                "Sistema".to_string(),
+                                format!("📹 '{}': reproductor cerrado, transferencia cancelada.", file_name),
+                            );
+                            return Some(from);
+                        }
                     }
                 }
                 Err(e) => {
@@ -317,7 +330,7 @@ impl AppState {
                         format!("❌ Error descifrando chunk {}: {}", chunk.chunk_index, e),
                     );
                     self.video_stream_senders.remove(&key);
-                    return;
+                    return None;
                 }
             }
 
@@ -325,19 +338,21 @@ impl AppState {
                 // Cerrar el canal → hilo escritor sale → mpv recibe EOF.
                 self.video_stream_senders.remove(&key);
             }
+
+            None
         } else {
             // ── Ruta archivo: acumular, reconstruir y guardar en disco ───────
 
             self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
 
             if !is_last {
-                return;
+                return None;
             }
 
             let Some(mut chunks) = self.file_recv_buffers.remove(&key) else {
                 self.record_message(from.clone(), "Sistema".to_string(),
                     "⚠️ Error interno: buffer no encontrado".to_string());
-                return;
+                return None;
             };
             chunks.sort_by_key(|c| c.chunk_index);
 
@@ -362,6 +377,8 @@ impl AppState {
                     );
                 }
             }
+
+            None
         }
     }
 

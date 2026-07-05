@@ -269,7 +269,18 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
             app.record_message(group, from, content);
         }
         ClientEvent::FileChunkReceived { from, chunk } => {
-            app.receive_file_chunk(from, chunk);
+            if let Some(cancelled_from) = app.receive_file_chunk(from, chunk) {
+                // El receptor cerró mpv: notificar al emisor para que sepa
+                // que la transferencia fue cancelada (best-effort).
+                if let Some(node) = app.find_node(&cancelled_from) {
+                    let ip = node.ip.clone();
+                    let port = node.port;
+                    let my_name = app.my_info.username.clone();
+                    tokio::spawn(async move {
+                        let _ = peer::notify_file_rejected_to(&ip, port, my_name).await;
+                    });
+                }
+            }
         }
         ClientEvent::SystemMessage { target, content } => {
             app.record_message(target, "Sistema".to_string(), content);
@@ -304,8 +315,19 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
             }
         }
         ClientEvent::FileRejected => {
-            // Soltar el Sender hace que el task de envío reciba Err y muestre el aviso.
-            app.pending_file_send = None;
+            if app.pending_file_send.take().is_none() {
+                // pending_file_send ya fue consumido (la transferencia estaba
+                // en curso): el receptor cerró mpv, no rechazó la oferta.
+                if let Some(target) = app.selected_contact.clone() {
+                    app.record_message(
+                        target,
+                        "Sistema".to_string(),
+                        "📹 El receptor cerró el reproductor.".to_string(),
+                    );
+                }
+            }
+            // Si pending_file_send era Some: se descarta el Sender, accept_rx
+            // recibe Err y el task de envío muestra "rechazó recibir".
         }
         ClientEvent::VideoCallAccepted { from } => {
             if let Some(node) = app.find_node(&from) {
