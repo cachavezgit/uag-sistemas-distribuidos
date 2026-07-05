@@ -594,51 +594,48 @@ impl AppState {
     /// (apenas le llega la confirmación `notify_video_call_accepted`).
     /// Retorna la bandera de corte para que el llamador arranque la
     /// captura/envío en background (`AppState` no conoce tokio/red).
+    /// Marca la sesión de video como activa y abre el reproductor inmediatamente
+    /// (sin esperar al primer frame del peer). Así la ventana aparece en cuanto
+    /// arranca la llamada, aunque el peer no tenga cámara.
     pub fn start_video_call(&mut self, peer: String) -> Arc<AtomicBool> {
         let stop = Arc::new(AtomicBool::new(false));
         self.video_active = true;
         self.record_message(peer.clone(), "Sistema".to_string(), format!("📹 Videollamada iniciada con {}.", peer));
-        self.video_session = Some(VideoSession { peer, frame_tx: None, stop_capture: stop.clone() });
+
+        let frame_tx = match PlayerHandle::open_mjpeg_stream() {
+            Ok((handle, stdin)) => {
+                let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    let mut stdin = stdin;
+                    while let Ok(frame) = rx.recv() {
+                        if stdin.write_all(&frame).is_err() {
+                            break;
+                        }
+                    }
+                });
+                self.active_players.push(handle);
+                Some(tx)
+            }
+            Err(e) => {
+                self.record_message(peer.clone(), "Sistema".to_string(),
+                    format!("No se pudo abrir el reproductor de video: {}", e));
+                None
+            }
+        };
+
+        self.video_session = Some(VideoSession { peer, frame_tx, stop_capture: stop.clone() });
         stop
     }
 
-    /// Aplica un frame de video recibido: al primer frame abre el reproductor
-    /// y lanza un hilo dedicado que escribe al pipe de mpv/ffplay. Los frames
-    /// siguientes se mandan al hilo vía `try_send` (sin bloquear el event loop).
-    /// Si el hilo escritor está ocupado (mpv tarda en consumir) se descarta el
-    /// frame — video en vivo tolera perder alguno.
+    /// Reenvía un frame JPEG recibido al hilo escritor que alimenta mpv.
+    /// Descarta el frame (try_send) si el hilo está ocupado — video en vivo
+    /// tolera perder algún frame.
     pub fn receive_video_frame(&mut self, from: String, jpeg: Vec<u8>) {
         let matches_peer = self.video_session.as_ref().map(|s| s.peer == from).unwrap_or(false);
         if !matches_peer {
             return;
         }
-
-        let needs_player = self.video_session.as_ref().is_some_and(|s| s.frame_tx.is_none());
-        if needs_player {
-            match PlayerHandle::open_mjpeg_stream() {
-                Ok((handle, stdin)) => {
-                    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
-                    std::thread::spawn(move || {
-                        use std::io::Write;
-                        let mut stdin = stdin;
-                        while let Ok(frame) = rx.recv() {
-                            if stdin.write_all(&frame).is_err() {
-                                break;
-                            }
-                        }
-                        // stdin cae aquí → mpv recibe EOF y reproduce lo que tenga en buffer
-                    });
-                    self.video_session.as_mut().unwrap().frame_tx = Some(tx);
-                    self.active_players.push(handle);
-                }
-                Err(e) => {
-                    self.record_message(from, "Sistema".to_string(), format!("No se pudo abrir el reproductor de video: {}", e));
-                    return;
-                }
-            }
-        }
-
-        // Envía el frame al hilo escritor sin bloquear; descarta si está ocupado.
         if let Some(tx) = self.video_session.as_ref().and_then(|s| s.frame_tx.as_ref()) {
             let _ = tx.try_send(jpeg);
         }
@@ -870,9 +867,9 @@ mod tests {
         let mut ivan = AppState::new(node("Ivan"), vec![node("Ivan"), node("Carlos"), node("Sofia")], 0);
         ivan.start_video_call("Carlos".to_string());
 
-        // Un frame que dice venir de "Sofia" no debería tocar la sesión con Carlos.
+        // Un frame que dice venir de "Sofia" no debería cambiar el peer de la sesión.
         ivan.receive_video_frame("Sofia".to_string(), vec![0u8, 1, 2]);
 
-        assert!(ivan.video_session.as_ref().unwrap().frame_tx.is_none());
+        assert_eq!(ivan.video_session.as_ref().unwrap().peer, "Carlos");
     }
 }
