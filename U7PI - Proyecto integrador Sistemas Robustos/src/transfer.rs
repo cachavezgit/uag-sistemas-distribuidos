@@ -62,6 +62,15 @@ pub fn fragment_and_encrypt(path: &str, key: &str) -> anyhow::Result<Vec<FileChu
     Ok(result)
 }
 
+/// Descifra un único chunk (Vigenère + Base64) y retorna los bytes originales.
+/// Útil para streaming de video: descifrar on-the-fly sin acumular todos los chunks.
+pub fn decrypt_single_chunk(data: Vec<u8>, key: &str) -> anyhow::Result<Vec<u8>> {
+    let cifrado = String::from_utf8(data)
+        .map_err(|e| anyhow::anyhow!("Chunk data no es UTF-8: {}", e))?;
+    let encoded = crate::crypto::descifrar(&cifrado, key);
+    B64.decode(&encoded).map_err(|e| anyhow::anyhow!("Error Base64: {}", e))
+}
+
 /// Descifra y reconstruye el archivo a partir de los chunks recibidos.
 /// Los chunks deben estar ordenados por chunk_index.
 /// Escribe el resultado en `output_dir/file_name` y retorna la ruta.

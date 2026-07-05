@@ -65,6 +65,9 @@ pub struct AppState {
     pub group_creation: Option<GroupCreationState>,
     /// Chunks acumulados de una transferencia en curso, por (remitente, nombre de archivo).
     pub file_recv_buffers: HashMap<(String, String), Vec<FileChunk>>,
+    /// Canales de streaming de video activos: descifra cada chunk on-the-fly
+    /// y lo manda al hilo escritor que alimenta el stdin de mpv/ffplay.
+    pub video_stream_senders: HashMap<(String, String), std::sync::mpsc::Sender<Vec<u8>>>,
     /// Reproductores mpv/ffplay lanzados para archivos recibidos; se
     /// conservan aquí para que `Drop` no los mate apenas termina la función
     /// que los abrió (`Drop` de `PlayerHandle` mata el proceso).
@@ -162,6 +165,7 @@ impl AppState {
             file_explorer: None,
             group_creation: None,
             file_recv_buffers: HashMap::new(),
+            video_stream_senders: HashMap::new(),
             active_players: Vec::new(),
             game_state: None,
             pending_game_invite_sent: None,
@@ -252,55 +256,111 @@ impl AppState {
         self.directory.iter().find(|n| n.username == username)
     }
 
-    /// Acumula un chunk de archivo recibido y, al llegar el último, reconstruye
-    /// el archivo en `./recibidos/`, deja constancia en el chat de `from` y,
-    /// si es un video, lo reproduce automáticamente con mpv/ffplay.
+    /// Recibe un chunk de archivo. Para videos, descifra on-the-fly y hace
+    /// streaming a mpv/ffplay desde el primer chunk (sin guardar en disco).
+    /// Para otros archivos, acumula todos los chunks, reconstruye y guarda
+    /// en `./recibidos/` al llegar el último.
     pub fn receive_file_chunk(&mut self, from: String, chunk: FileChunk) {
-        let key = (from.clone(), chunk.file_name.clone());
+        let file_name = chunk.file_name.clone();
+        let key = (from.clone(), file_name.clone());
         let is_last = chunk.chunk_index + 1 == chunk.total_chunks;
 
+        if is_video_file(&file_name) {
+            // ── Ruta streaming: descifrar y pipar on-the-fly a mpv ──────────
 
-        self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
-
-        if !is_last {
-            return;
-        }
-
-        let Some(mut chunks) = self.file_recv_buffers.remove(&key) else {
-            self.record_message(from.clone(), "Sistema".to_string(), "⚠️ Error interno: buffer no encontrado".to_string());
-            return;
-        };
-        chunks.sort_by_key(|c| c.chunk_index);
-        let file_name = key.1;
-
-        match gato_p2p::transfer::decrypt_and_reconstruct(&chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos") {
-            Ok(path) => {
-                // Mostrar ruta absoluta para que el usuario sepa dónde está el archivo.
-                let abs_path = std::fs::canonicalize(&path)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| path.clone());
-                self.record_message(
-                    from.clone(),
-                    from.clone(),
-                    format!("📎 Archivo recibido: {} → {}", file_name, abs_path),
-                );
-                if is_video_file(&file_name) {
-                    match PlayerHandle::play_file(Path::new(&path)) {
-                        Ok(handle) => self.active_players.push(handle),
-                        Err(e) => self.record_message(
+            // Primer chunk: abrir el reproductor y lanzar el hilo escritor.
+            if chunk.chunk_index == 0 {
+                match PlayerHandle::open_stream() {
+                    Ok((handle, stdin)) => {
+                        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                        std::thread::spawn(move || {
+                            use std::io::Write;
+                            let mut stdin = stdin;
+                            while let Ok(data) = rx.recv() {
+                                if stdin.write_all(&data).is_err() {
+                                    break;
+                                }
+                            }
+                            // Al cerrarse el canal (último chunk enviado), stdin
+                            // se descarta → mpv recibe EOF y termina solo.
+                        });
+                        self.active_players.push(handle);
+                        self.video_stream_senders.insert(key.clone(), tx);
+                        self.record_message(
+                            from.clone(),
+                            "Sistema".to_string(),
+                            format!("📹 Reproduciendo '{}' en tiempo real...", file_name),
+                        );
+                    }
+                    Err(e) => {
+                        self.record_message(
                             from,
                             "Sistema".to_string(),
-                            format!("No se pudo reproducir {}: {}", file_name, e),
-                        ),
+                            format!("❌ No se pudo abrir el reproductor para '{}': {}", file_name, e),
+                        );
+                        return;
                     }
                 }
             }
-            Err(e) => {
-                self.record_message(
-                    from,
-                    "Sistema".to_string(),
-                    format!("Error recibiendo {}: {}", file_name, e),
-                );
+
+            // Descifrar este chunk y mandarlo al hilo escritor.
+            match gato_p2p::transfer::decrypt_single_chunk(chunk.data, gato_p2p::CLAVE_VIGENERE) {
+                Ok(raw) => {
+                    if let Some(tx) = self.video_stream_senders.get(&key) {
+                        let _ = tx.send(raw);
+                    }
+                }
+                Err(e) => {
+                    self.record_message(
+                        from.clone(),
+                        "Sistema".to_string(),
+                        format!("❌ Error descifrando chunk {}: {}", chunk.chunk_index, e),
+                    );
+                    self.video_stream_senders.remove(&key);
+                    return;
+                }
+            }
+
+            if is_last {
+                // Cerrar el canal → hilo escritor sale → mpv recibe EOF.
+                self.video_stream_senders.remove(&key);
+            }
+        } else {
+            // ── Ruta archivo: acumular, reconstruir y guardar en disco ───────
+
+            self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
+
+            if !is_last {
+                return;
+            }
+
+            let Some(mut chunks) = self.file_recv_buffers.remove(&key) else {
+                self.record_message(from.clone(), "Sistema".to_string(),
+                    "⚠️ Error interno: buffer no encontrado".to_string());
+                return;
+            };
+            chunks.sort_by_key(|c| c.chunk_index);
+
+            match gato_p2p::transfer::decrypt_and_reconstruct(
+                &chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos",
+            ) {
+                Ok(path) => {
+                    let abs_path = std::fs::canonicalize(&path)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| path.clone());
+                    self.record_message(
+                        from.clone(),
+                        from,
+                        format!("📎 Archivo recibido: {} → {}", file_name, abs_path),
+                    );
+                }
+                Err(e) => {
+                    self.record_message(
+                        from,
+                        "Sistema".to_string(),
+                        format!("❌ Error recibiendo {}: {}", file_name, e),
+                    );
+                }
             }
         }
     }
