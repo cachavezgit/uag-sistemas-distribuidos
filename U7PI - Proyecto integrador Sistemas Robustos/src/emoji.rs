@@ -27,14 +27,10 @@ pub fn tabla() -> HashMap<&'static str, &'static str> {
 /// Si el mensaje empieza con "/e ", traduce los signos conocidos en el resto del texto.
 /// Ejemplo: "/e hola :) como estas LOL" → "hola 😊 como estas 😂"
 pub fn procesar(input: &str) -> String {
-    if !input.starts_with("/e ") {
-        return input.to_string();
-    }
-    let texto = &input[3..];
     let tabla = tabla();
-    let mut resultado = texto.to_string();
+    let mut resultado = input.to_string();
     for (signo, emoji) in &tabla {
-        resultado = resultado.replace(signo, emoji);
+        resultado = resultado.replace(&format!("/e {}", signo), emoji);
     }
     resultado
 }
@@ -43,10 +39,8 @@ pub fn procesar(input: &str) -> String {
 mod tests {
     #[test]
     fn emoji_procesar_con_prefijo() {
-        let resultado = crate::emoji::procesar("/e hola :) LOL");
-        assert!(resultado.contains("😊"));
-        assert!(resultado.contains("😂"));
-        assert!(!resultado.starts_with("/e"));
+        let resultado = crate::emoji::procesar("Si aqui tambien hace /e calor y /e :)");
+        assert_eq!(resultado, "Si aqui tambien hace 🔥 y 😊");
     }
 
     #[test]
