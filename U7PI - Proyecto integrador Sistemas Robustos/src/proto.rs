@@ -17,14 +17,24 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::transfer::FileChunk;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub username: String,
     pub emoji: String, // emoji elegido al conectarse, ej. "🦀"
     pub ip: String,
     pub port: u16,
+}
+
+/// Versión del FileChunk de transfer.rs optimizada para el transporte JSON:
+/// `data` se serializa como String en vez de Vec<u8> (array de enteros).
+/// El pipeline de crypto garantiza que data contiene solo ASCII imprimible,
+/// así que String → JSON es ~1:1 en tamaño en lugar de ~3.5:1 con Vec<u8>.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunkRpc {
+    pub file_name: String,
+    pub chunk_index: u32,
+    pub total_chunks: u32,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +60,7 @@ pub trait RegistryService {
 pub trait PeerService {
     async fn send_message(from: String, content: String) -> Result<(), String>;
     async fn send_group_message(from: String, group: String, content: String) -> Result<(), String>;
-    async fn send_file_chunk(from: String, chunk: FileChunk) -> Result<(), String>;
+    async fn send_file_chunk(from: String, chunk: FileChunkRpc) -> Result<(), String>;
     async fn send_video_frame(from: String, jpeg_data: Vec<u8>) -> Result<(), String>;
     async fn game_move(from: String, position: u8) -> Result<(), String>;
     async fn game_invite(from: String) -> Result<(), String>;

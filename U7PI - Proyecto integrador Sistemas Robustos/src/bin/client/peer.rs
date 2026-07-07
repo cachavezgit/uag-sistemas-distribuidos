@@ -17,7 +17,7 @@ use tarpc::{
 };
 use tokio::sync::mpsc;
 
-use gato_p2p::proto::{GroupInfo, NodeInfo, PeerService, PeerServiceClient};
+use gato_p2p::proto::{FileChunkRpc, GroupInfo, NodeInfo, PeerService, PeerServiceClient};
 use gato_p2p::transfer::FileChunk;
 
 use super::app::ClientEvent;
@@ -51,7 +51,13 @@ impl PeerService for PeerServer {
         self.emit(ClientEvent::GroupMessage { from, group, content }).await
     }
 
-    async fn send_file_chunk(self, _: context::Context, from: String, chunk: FileChunk) -> Result<(), String> {
+    async fn send_file_chunk(self, _: context::Context, from: String, chunk: FileChunkRpc) -> Result<(), String> {
+        let chunk = FileChunk {
+            file_name: chunk.file_name,
+            chunk_index: chunk.chunk_index,
+            total_chunks: chunk.total_chunks,
+            data: chunk.data.into_bytes(),
+        };
         self.emit(ClientEvent::FileChunkReceived { from, chunk }).await
     }
 
@@ -178,8 +184,14 @@ pub async fn send_file_to(
     let total = chunks.len() as u32;
 
     for (i, chunk) in chunks.into_iter().enumerate() {
+        let rpc_chunk = FileChunkRpc {
+            file_name: chunk.file_name,
+            chunk_index: chunk.chunk_index,
+            total_chunks: chunk.total_chunks,
+            data: String::from_utf8(chunk.data).unwrap_or_default(),
+        };
         client
-            .send_file_chunk(context::current(), from.clone(), chunk)
+            .send_file_chunk(context::current(), from.clone(), rpc_chunk)
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
         let current = i as u32 + 1;
