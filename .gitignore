@@ -51,4 +51,5 @@ mds/
 
 # Archivos generados en runtime
 recibidos/
+sesiones/
 crypto.log

@@ -4,6 +4,8 @@
     { "usuario": "jugador1",  "contrasena": "pass1" },
     { "usuario": "jugador2",  "contrasena": "pass2" },
     { "usuario": "jugador3",  "contrasena": "pass3" },
+    { "usuario": "jugador4",  "contrasena": "pass4" },
+    { "usuario": "jugador5",  "contrasena": "pass5" },
     { "usuario": "admin",     "contrasena": "admin456" }
   ]
 }

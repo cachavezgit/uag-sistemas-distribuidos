@@ -57,13 +57,10 @@ pub fn autenticar() -> Option<String> {
     let mut usuario = String::new();
     io::stdin().read_line(&mut usuario).unwrap();
 
-    print!("  Contraseña: ");
-    io::stdout().flush().unwrap();
-    let mut contrasena = String::new();
-    io::stdin().read_line(&mut contrasena).unwrap();
+    let contrasena = rpassword::prompt_password("  Contraseña: ").unwrap_or_default();
 
     let usuario = usuario.trim();
-    let contrasena = contrasena.trim();
+    let contrasena = contrasena.trim(); // rpassword ya no incluye \n, trim por consistencia
 
     let contenido = match std::fs::read_to_string(ARCHIVO_USUARIOS) {
         Ok(c) => c,
