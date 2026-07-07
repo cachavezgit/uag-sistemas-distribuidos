@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto;
 
-const CHUNK_SIZE: usize = 65_536; // 64 KB por chunk
+const CHUNK_SIZE: usize = 524_288; // 512 KB por chunk
 
 /// Paquete que representa un fragmento cifrado del archivo transferido
 #[derive(Debug, Clone, Serialize, Deserialize)]

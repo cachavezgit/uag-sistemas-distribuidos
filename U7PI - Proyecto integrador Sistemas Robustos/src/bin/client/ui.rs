@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -187,6 +187,17 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Si hay una transferencia activa reservar 1 línea al fondo para la barra.
+    let (chat_area, gauge_area) = if app.file_transfer_progress.is_some() {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        (parts[0], Some(parts[1]))
+    } else {
+        (inner, None)
+    };
+
     let Some(key) = &app.selected_contact else { return };
     let Some(messages) = app.chats.get(key) else { return };
 
@@ -207,9 +218,22 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &AppState) {
 
     // Mostrar siempre los mensajes más recientes: si hay más líneas que
     // espacio vertical disponible, descartar las más antiguas.
-    let visible_height = inner.height as usize;
+    let visible_height = chat_area.height as usize;
     let skip = lines.len().saturating_sub(visible_height);
-    frame.render_widget(Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()), inner);
+    frame.render_widget(Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()), chat_area);
+
+    if let (Some(area), Some((fname, current, total, is_sending))) =
+        (gauge_area, &app.file_transfer_progress)
+    {
+        let pct = if *total > 0 { ((*current as u64 * 100) / *total as u64) as u16 } else { 0 };
+        let dir = if *is_sending { "Enviando" } else { "Recibiendo" };
+        let label = format!(" {} {}... {}% ({}/{})", dir, fname, pct, current, total);
+        let gauge = Gauge::default()
+            .gauge_style(Style::default().fg(Color::Black).bg(Color::Green))
+            .percent(pct)
+            .label(label);
+        frame.render_widget(gauge, area);
+    }
 }
 
 /// Tablero de gato embebido — reemplaza el panel de chat en `AppMode::Game`.

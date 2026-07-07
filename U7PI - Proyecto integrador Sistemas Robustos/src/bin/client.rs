@@ -282,6 +282,15 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
                 }
             }
         }
+        ClientEvent::FileProgress { current, total } => {
+            if let Some(ref mut p) = app.file_transfer_progress {
+                p.1 = current;
+                p.2 = total;
+            }
+            if current >= total {
+                app.file_transfer_progress = None;
+            }
+        }
         ClientEvent::SystemMessage { target, content } => {
             app.record_message(target, "Sistema".to_string(), content);
         }
@@ -682,8 +691,10 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
         return;
     }
 
+    let total = chunks.len() as u32;
     let (accept_tx, accept_rx) = tokio::sync::oneshot::channel::<()>();
     app.pending_file_send = Some(accept_tx);
+    app.file_transfer_progress = Some((file_name.clone(), 0, total, true));
     app.record_message(target.clone(), "Sistema".to_string(), format!("📎 Ofreciendo '{}' a {}...", file_name, target));
 
     tokio::spawn(async move {
@@ -703,7 +714,7 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
             return;
         }
 
-        let content = match peer::send_file_to(&ip, port, from, chunks).await {
+        let content = match peer::send_file_to(&ip, port, from, chunks, Some(event_tx.clone())).await {
             Ok(()) => format!("✅ {} enviado", file_name),
             Err(e) => format!("❌ Error enviando {}: {}", file_name, e),
         };

@@ -48,6 +48,7 @@ pub enum ClientEvent {
     FileOffer { from: String, file_name: String },
     FileAccepted,
     FileRejected,
+    FileProgress { current: u32, total: u32 },
 }
 
 pub struct AppState {
@@ -86,6 +87,8 @@ pub struct AppState {
     pub pending_file_offer: Option<PendingFileOffer>,
     /// Canal para notificar al task de envío que el receptor aceptó (emisor).
     pub pending_file_send: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Progreso de la transferencia activa: (nombre, chunks_hechos, total, es_envío).
+    pub file_transfer_progress: Option<(String, u32, u32, bool)>,
     pub should_quit: bool,
 }
 
@@ -175,6 +178,7 @@ impl AppState {
             pending_video_call_invite: None,
             pending_file_offer: None,
             pending_file_send: None,
+            file_transfer_progress: None,
             should_quit: false,
         };
         // Selecciona el primer contacto disponible, si hay alguno.
@@ -343,7 +347,11 @@ impl AppState {
         } else {
             // ── Ruta archivo: acumular, reconstruir y guardar en disco ───────
 
+            let chunk_index = chunk.chunk_index;
+            let total_chunks = chunk.total_chunks;
             self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
+
+            self.file_transfer_progress = Some((file_name.clone(), chunk_index + 1, total_chunks, false));
 
             if !is_last {
                 return None;
@@ -356,6 +364,7 @@ impl AppState {
             };
             chunks.sort_by_key(|c| c.chunk_index);
 
+            self.file_transfer_progress = None;
             match gato_p2p::transfer::decrypt_and_reconstruct(
                 &chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos",
             ) {

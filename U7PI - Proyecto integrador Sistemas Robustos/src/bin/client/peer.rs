@@ -170,14 +170,22 @@ pub async fn send_group_message_to(
 /// (`transfer::fragment_and_encrypt`) a un peer, sobre una única conexión,
 /// esperando el ack de cada chunk antes de mandar el siguiente (igual que
 /// `network::send_file_chunks` en el U6).
-pub async fn send_file_to(ip: &str, port: u16, from: String, chunks: Vec<FileChunk>) -> anyhow::Result<()> {
+pub async fn send_file_to(
+    ip: &str, port: u16, from: String, chunks: Vec<FileChunk>,
+    progress_tx: Option<mpsc::Sender<ClientEvent>>,
+) -> anyhow::Result<()> {
     let client = dial(ip, port).await?;
+    let total = chunks.len() as u32;
 
-    for chunk in chunks {
+    for (i, chunk) in chunks.into_iter().enumerate() {
         client
             .send_file_chunk(context::current(), from.clone(), chunk)
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
+        let current = i as u32 + 1;
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.try_send(ClientEvent::FileProgress { current, total });
+        }
     }
 
     Ok(())
