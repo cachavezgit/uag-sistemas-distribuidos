@@ -672,12 +672,15 @@ impl AppState {
         }
         // Lazy-init del playback al primer chunk
         if self.video_session.as_ref().and_then(|s| s.audio_playback_tx.as_ref()).is_none() {
-            match gato_p2p::audio::start_playback(sample_rate) {
+            match gato_p2p::audio::start_playback() {
                 Ok((playback_handle, tx)) => {
+                    let dev = playback_handle.device_name.clone();
                     if let Some(session) = self.video_session.as_mut() {
                         session.audio_playback = Some(playback_handle);
                         session.audio_playback_tx = Some(tx);
                     }
+                    self.record_message(from.clone(), "Sistema".to_string(),
+                        format!("🔊 Audio reproduciendo en: {}", dev));
                 }
                 Err(e) => {
                     if let Some(session) = self.video_session.as_mut() {

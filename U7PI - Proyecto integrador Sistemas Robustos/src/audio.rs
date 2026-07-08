@@ -1,14 +1,5 @@
 // ─────────────────────────────────────────────────────────
 // audio.rs — Captura y reproducción de audio para videollamada
-//
-// start_capture: abre el dispositivo de entrada por defecto (micrófono
-//   o VirtualMic en la Pi) y empuja chunks PCM mono i16 a un canal tokio.
-//
-// start_playback: abre el dispositivo de salida por defecto y reproduce
-//   los chunks PCM mono i16 que lleguen por un canal std::sync::mpsc.
-//
-// Ambas funciones retornan un "handle" que debe mantenerse vivo mientras
-// dure la llamada — el Drop del handle cierra el stream de cpal.
 // ─────────────────────────────────────────────────────────
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -22,27 +13,44 @@ use std::sync::{
 pub struct AudioCapture {
     _stream: cpal::Stream,
     pub sample_rate: u32,
+    pub device_name: String,
 }
 
-// cpal::Stream contiene raw pointers pero es Send en las plataformas que usamos
 unsafe impl Send for AudioCapture {}
 
 pub struct AudioPlayback {
     _stream: cpal::Stream,
+    pub device_name: String,
 }
 
 unsafe impl Send for AudioPlayback {}
 
-/// Inicia la captura del dispositivo de entrada por defecto.
-/// Retorna el handle (mantener vivo) y un Receiver de chunks PCM mono i16.
-/// El canal es tokio para que el consumidor async pueda hacer `.recv().await`.
+/// Selecciona el dispositivo de entrada: busca primero uno cuyo nombre
+/// contenga "VirtualMic" (para la Pi con audio_simulator.py), y si no
+/// encuentra ninguno usa el dispositivo por defecto del sistema.
+fn pick_input_device(host: &cpal::Host) -> anyhow::Result<cpal::Device> {
+    if let Ok(mut devs) = host.input_devices() {
+        if let Some(d) = devs.find(|d| {
+            d.name()
+                .map(|n| n.to_lowercase().contains("virtualmic"))
+                .unwrap_or(false)
+        }) {
+            return Ok(d);
+        }
+    }
+    host.default_input_device()
+        .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de entrada de audio"))
+}
+
+/// Inicia la captura de audio.
+/// Retorna el handle (mantener vivo) + Receiver de chunks PCM mono i16
+/// + nombre del dispositivo seleccionado para mostrarlo en la UI.
 pub fn start_capture(
     stop: Arc<AtomicBool>,
 ) -> anyhow::Result<(AudioCapture, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de entrada de audio"))?;
+    let device = pick_input_device(&host)?;
+    let device_name = device.name().unwrap_or_else(|_| "desconocido".to_string());
 
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;
@@ -96,34 +104,28 @@ pub fn start_capture(
         }
         fmt => {
             return Err(anyhow::anyhow!(
-                "Formato de audio de entrada no soportado: {:?}",
+                "Formato de captura no soportado: {:?}",
                 fmt
             ))
         }
     };
 
     stream.play()?;
-    Ok((AudioCapture { _stream: stream, sample_rate }, rx))
+    Ok((AudioCapture { _stream: stream, sample_rate, device_name }, rx))
 }
 
 /// Inicia la reproducción en el dispositivo de salida por defecto.
-/// Retorna el handle y un SyncSender para empujar chunks PCM mono i16.
-/// Usa la config nativa del dispositivo para evitar errores de backend
-/// (Core Audio en Mac rechaza sample rates que no soporten directamente).
-pub fn start_playback(
-    _sample_rate: u32,
-) -> anyhow::Result<(AudioPlayback, std::sync::mpsc::SyncSender<Vec<i16>>)> {
+/// Maneja tanto f32 como i16 según lo que soporte el dispositivo.
+pub fn start_playback() -> anyhow::Result<(AudioPlayback, std::sync::mpsc::SyncSender<Vec<i16>>)> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de salida de audio"))?;
 
+    let device_name = device.name().unwrap_or_else(|_| "desconocido".to_string());
     let default_cfg = device.default_output_config()?;
     let out_channels = default_cfg.channels() as usize;
     let sample_rate = default_cfg.sample_rate().0;
-
-    // Usar la config nativa del dispositivo; si el emisor captura a un rate
-    // distinto el tono variará levemente, aceptable para una demo P2P.
     let config = default_cfg.config();
 
     let buf: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -131,12 +133,10 @@ pub fn start_playback(
 
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<Vec<i16>>(64);
 
-    // Hilo que drena el canal síncrono hacia el VecDeque compartido con cpal
     std::thread::spawn(move || {
         while let Ok(samples) = sync_rx.recv() {
             let mut b = buf_write.lock().unwrap();
             b.extend(&samples);
-            // No acumular más de 2 s de audio (descarta los más antiguos)
             while b.len() > sample_rate as usize * 2 {
                 b.pop_front();
             }
@@ -144,24 +144,57 @@ pub fn start_playback(
     });
 
     let buf_read = buf.clone();
-    let stream = device.build_output_stream(
-        &config,
-        move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let mut b = buf_read.lock().unwrap();
-            for frame in out.chunks_mut(out_channels) {
-                let sample = b
-                    .pop_front()
-                    .map(|v| v as f32 / i16::MAX as f32)
-                    .unwrap_or(0.0);
-                for s in frame.iter_mut() {
-                    *s = sample;
+
+    // Intenta abrir con f32 (macOS/Windows), luego con i16 (ALSA/Linux)
+    let stream = device
+        .build_output_stream(
+            &config,
+            {
+                let buf = buf_read.clone();
+                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut b = buf.lock().unwrap();
+                    for frame in out.chunks_mut(out_channels) {
+                        let s = b
+                            .pop_front()
+                            .map(|v| v as f32 / i16::MAX as f32)
+                            .unwrap_or(0.0);
+                        for ch in frame.iter_mut() {
+                            *ch = s;
+                        }
+                    }
                 }
-            }
-        },
-        |e| eprintln!("[audio] reproducción: {e}"),
-        None,
-    )?;
+            },
+            |e| eprintln!("[audio] reproducción: {e}"),
+            None,
+        )
+        .or_else(|_| {
+            // Fallback: i16
+            device.build_output_stream(
+                &config,
+                move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    let mut b = buf_read.lock().unwrap();
+                    for frame in out.chunks_mut(out_channels) {
+                        let s = b.pop_front().unwrap_or(0);
+                        for ch in frame.iter_mut() {
+                            *ch = s;
+                        }
+                    }
+                },
+                |e| eprintln!("[audio] reproducción: {e}"),
+                None,
+            )
+        })?;
 
     stream.play()?;
-    Ok((AudioPlayback { _stream: stream }, sync_tx))
+    Ok((AudioPlayback { _stream: stream, device_name }, sync_tx))
+}
+
+/// Lista los dispositivos de entrada disponibles (para diagnóstico).
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devs| {
+            devs.filter_map(|d| d.name().ok()).collect()
+        })
+        .unwrap_or_default()
 }

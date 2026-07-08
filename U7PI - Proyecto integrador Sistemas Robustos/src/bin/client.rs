@@ -548,19 +548,36 @@ fn start_audio_capture_and_stream(
     ip: String,
     port: u16,
     my_username: String,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     app: &mut AppState,
 ) {
-    let _ = stop; // el Receiver del canal ya cierra el stream al colgar
+    // Lista dispositivos disponibles para diagnóstico
+    let available = gato_p2p::audio::list_input_devices();
+
     match gato_p2p::audio::start_capture(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))) {
         Ok((handle, audio_rx)) => {
             let sample_rate = handle.sample_rate;
+            let dev_name = handle.device_name.clone();
             app.set_audio_capture(handle);
+            if let Some(target) = app.selected_contact.clone() {
+                app.record_message(target, "Sistema".to_string(),
+                    format!("🎙️ Capturando audio desde: {}", dev_name));
+            }
             tokio::spawn(async move {
                 let _ = peer::stream_audio_to(&ip, port, my_username, sample_rate, audio_rx).await;
             });
         }
-        Err(_) => {}
+        Err(e) => {
+            let devs_str = if available.is_empty() {
+                "ninguno encontrado".to_string()
+            } else {
+                available.join(", ")
+            };
+            if let Some(target) = app.selected_contact.clone() {
+                app.record_message(target, "Sistema".to_string(),
+                    format!("⚠️ Audio de entrada no disponible: {}. Dispositivos: {}", e, devs_str));
+            }
+        }
     }
 }
 
