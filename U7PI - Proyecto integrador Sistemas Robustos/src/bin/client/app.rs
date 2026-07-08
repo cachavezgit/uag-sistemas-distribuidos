@@ -137,6 +137,8 @@ pub struct VideoSession {
     pub audio_playback: Option<gato_p2p::audio::AudioPlayback>,
     /// Handle del stream de captura de audio (mantener vivo).
     pub audio_capture: Option<gato_p2p::audio::AudioCapture>,
+    /// true si start_playback falló: evita reintentar en cada chunk entrante.
+    pub audio_playback_init_failed: bool,
     /// Compartido con el hilo de captura (`video::start_capture`); ponerlo
     /// en `true` le pide que se detenga al colgar.
     pub stop_capture: Arc<AtomicBool>,
@@ -628,6 +630,7 @@ impl AppState {
             audio_playback_tx: None,
             audio_playback: None,
             audio_capture: None,  // se asigna desde client.rs tras start_capture
+            audio_playback_init_failed: false,
             stop_capture: stop.clone(),
         });
         stop
@@ -657,9 +660,14 @@ impl AppState {
     /// Recibe un chunk de audio durante una videollamada activa.
     /// En el primer chunk inicializa el stream de reproducción; los siguientes
     /// se envían al hilo de reproducción sin overhead adicional.
+    /// Si la inicialización falla, registra el error UNA vez y no reintenta.
     pub fn receive_audio_chunk(&mut self, from: String, sample_rate: u32, data: Vec<i16>) {
         let matches = self.video_session.as_ref().map(|s| s.peer == from).unwrap_or(false);
         if !matches {
+            return;
+        }
+        // Si ya falló la inicialización, descartar silenciosamente
+        if self.video_session.as_ref().map(|s| s.audio_playback_init_failed).unwrap_or(false) {
             return;
         }
         // Lazy-init del playback al primer chunk
@@ -672,6 +680,9 @@ impl AppState {
                     }
                 }
                 Err(e) => {
+                    if let Some(session) = self.video_session.as_mut() {
+                        session.audio_playback_init_failed = true;
+                    }
                     self.record_message(from, "Sistema".to_string(),
                         format!("⚠️ Audio de salida no disponible: {}", e));
                     return;

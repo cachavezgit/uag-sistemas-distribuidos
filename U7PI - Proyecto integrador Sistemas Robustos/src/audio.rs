@@ -108,21 +108,23 @@ pub fn start_capture(
 
 /// Inicia la reproducción en el dispositivo de salida por defecto.
 /// Retorna el handle y un SyncSender para empujar chunks PCM mono i16.
+/// Usa la config nativa del dispositivo para evitar errores de backend
+/// (Core Audio en Mac rechaza sample rates que no soporten directamente).
 pub fn start_playback(
-    sample_rate: u32,
+    _sample_rate: u32,
 ) -> anyhow::Result<(AudioPlayback, std::sync::mpsc::SyncSender<Vec<i16>>)> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de salida de audio"))?;
 
-    let out_channels = device.default_output_config()?.channels() as usize;
+    let default_cfg = device.default_output_config()?;
+    let out_channels = default_cfg.channels() as usize;
+    let sample_rate = default_cfg.sample_rate().0;
 
-    let config = cpal::StreamConfig {
-        channels: out_channels as u16,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
+    // Usar la config nativa del dispositivo; si el emisor captura a un rate
+    // distinto el tono variará levemente, aceptable para una demo P2P.
+    let config = default_cfg.config();
 
     let buf: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
     let buf_write = buf.clone();
