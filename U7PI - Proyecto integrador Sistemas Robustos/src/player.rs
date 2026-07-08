@@ -186,6 +186,9 @@ impl PlayerHandle {
             Player::MpvIpc(bin, socket_path) => Command::new(bin)
                 .args([
                     "--no-terminal",
+                    "--cache=yes",
+                    "--demuxer-seekable-cache=yes",
+                    "--cache-secs=30",
                     &format!("--input-ipc-server={}", socket_path),
                     "-",
                 ])

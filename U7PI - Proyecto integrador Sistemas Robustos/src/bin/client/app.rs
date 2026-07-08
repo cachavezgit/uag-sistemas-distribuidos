@@ -89,6 +89,9 @@ pub struct AppState {
     /// Señal de cancelación para el task de envío activo. Se activa cuando el
     /// receptor cancela la transferencia a mitad (p.ej. cierra el reproductor).
     pub file_send_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Canales de escritura al stdin de mpv para cada video en streaming
+    /// (una entrada por cada (remitente, nombre_archivo) activo).
+    pub video_stream_senders: HashMap<(String, String), std::sync::mpsc::Sender<Vec<u8>>>,
     pub should_quit: bool,
 }
 
@@ -179,6 +182,7 @@ impl AppState {
             pending_file_send: None,
             file_transfer_progress: None,
             file_send_cancel: None,
+            video_stream_senders: HashMap::new(),
             should_quit: false,
         };
         // Selecciona el primer contacto disponible, si hay alguno.
@@ -260,71 +264,112 @@ impl AppState {
         self.directory.iter().find(|n| n.username == username)
     }
 
-    /// Acumula chunks de un archivo entrante. Al recibir el último, descifra,
-    /// reconstruye en `./recibidos/` y abre el reproductor si es video.
-    /// Retorna `Some(from)` en caso de cancelación para notificar al emisor.
+    /// Recibe un chunk de archivo. Para videos inicia reproducción desde el
+    /// primer chunk (streaming a mpv con caché habilitado para poder pausar
+    /// y buscar). Para otros archivos acumula, reconstruye y guarda en disco.
+    /// Retorna `Some(from)` si mpv se cerró antes de terminar.
     pub fn receive_file_chunk(&mut self, from: String, chunk: FileChunk) -> Option<String> {
         let file_name = chunk.file_name.clone();
         let key = (from.clone(), file_name.clone());
         let is_last = chunk.chunk_index + 1 == chunk.total_chunks;
 
-        let chunk_index = chunk.chunk_index;
-        let total_chunks = chunk.total_chunks;
-        self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
-        self.file_transfer_progress = Some((file_name.clone(), chunk_index + 1, total_chunks, false));
-
-        if !is_last {
-            return None;
-        }
-
-        let Some(mut chunks) = self.file_recv_buffers.remove(&key) else {
-            self.record_message(from.clone(), "Sistema".to_string(),
-                "⚠️ Error interno: buffer no encontrado".to_string());
-            return None;
-        };
-        chunks.sort_by_key(|c| c.chunk_index);
-
-        self.file_transfer_progress = None;
-        match gato_p2p::transfer::decrypt_and_reconstruct(
-            &chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos",
-        ) {
-            Ok(path) => {
-                let abs_path = std::fs::canonicalize(&path)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| path.clone());
-                if is_video_file(&file_name) {
-                    match PlayerHandle::play_file(std::path::Path::new(&path)) {
-                        Ok(handle) => {
-                            self.active_players.push(handle);
-                            self.record_message(
-                                from.clone(), from,
-                                format!("📹 Video recibido → {} (Espacio: pausar, ←/→: retroceder/avanzar, Q: detener)", abs_path),
-                            );
-                        }
-                        Err(e) => {
-                            self.record_message(
-                                from.clone(), from,
-                                format!("📎 Video guardado: {} — no se pudo abrir el reproductor: {}", abs_path, e),
-                            );
-                        }
+        if is_video_file(&file_name) {
+            // ── Ruta video: streaming a mpv desde el primer chunk ────────────
+            if chunk.chunk_index == 0 {
+                match PlayerHandle::open_stream() {
+                    Ok((handle, stdin)) => {
+                        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                        std::thread::spawn(move || {
+                            use std::io::Write;
+                            let mut stdin = stdin;
+                            while let Ok(data) = rx.recv() {
+                                if stdin.write_all(&data).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        self.active_players.push(handle);
+                        self.video_stream_senders.insert(key.clone(), tx);
+                        self.record_message(
+                            from.clone(),
+                            "Sistema".to_string(),
+                            format!("📹 Reproduciendo '{}' (Espacio: pausar  ←/→: buscar  Q: detener)", file_name),
+                        );
                     }
-                } else {
-                    self.record_message(
-                        from.clone(), from,
-                        format!("📎 Archivo recibido: {} → {}", file_name, abs_path),
-                    );
+                    Err(e) => {
+                        self.record_message(from, "Sistema".to_string(),
+                            format!("❌ No se pudo abrir el reproductor: {}", e));
+                        return None;
+                    }
                 }
             }
-            Err(e) => {
-                self.record_message(
-                    from,
-                    "Sistema".to_string(),
-                    format!("❌ Error recibiendo {}: {}", file_name, e),
-                );
-            }
-        }
 
-        None
+            let chunk_index = chunk.chunk_index;
+            let total_chunks = chunk.total_chunks;
+            self.file_transfer_progress = Some((file_name.clone(), chunk_index + 1, total_chunks, false));
+
+            match gato_p2p::transfer::decrypt_single_chunk(chunk.data, gato_p2p::CLAVE_VIGENERE) {
+                Ok(raw) => {
+                    if let Some(tx) = self.video_stream_senders.get(&key) {
+                        if tx.send(raw).is_err() {
+                            self.video_stream_senders.remove(&key);
+                            self.file_transfer_progress = None;
+                            self.record_message(from.clone(), "Sistema".to_string(),
+                                format!("📹 '{}': reproductor cerrado.", file_name));
+                            return Some(from);
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.record_message(from.clone(), "Sistema".to_string(),
+                        format!("❌ Error descifrando chunk {}: {}", chunk_index, e));
+                    self.video_stream_senders.remove(&key);
+                    return None;
+                }
+            }
+
+            if is_last {
+                self.video_stream_senders.remove(&key);
+                self.file_transfer_progress = None;
+            }
+            None
+
+        } else {
+            // ── Ruta archivo: acumular, reconstruir y guardar en disco ───────
+            let chunk_index = chunk.chunk_index;
+            let total_chunks = chunk.total_chunks;
+            self.file_recv_buffers.entry(key.clone()).or_default().push(chunk);
+            self.file_transfer_progress = Some((file_name.clone(), chunk_index + 1, total_chunks, false));
+
+            if !is_last {
+                return None;
+            }
+
+            let Some(mut chunks) = self.file_recv_buffers.remove(&key) else {
+                self.record_message(from.clone(), "Sistema".to_string(),
+                    "⚠️ Error interno: buffer no encontrado".to_string());
+                return None;
+            };
+            chunks.sort_by_key(|c| c.chunk_index);
+            self.file_transfer_progress = None;
+
+            match gato_p2p::transfer::decrypt_and_reconstruct(
+                &chunks, gato_p2p::CLAVE_VIGENERE, "./recibidos",
+            ) {
+                Ok(path) => {
+                    let abs_path = std::fs::canonicalize(&path)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| path.clone());
+                    self.record_message(from.clone(), from,
+                        format!("📎 Archivo recibido: {} → {}", file_name, abs_path));
+                }
+                Err(e) => {
+                    self.record_message(from, "Sistema".to_string(),
+                        format!("❌ Error recibiendo {}: {}", file_name, e));
+                }
+            }
+            None
+        }
     }
 
     /// Limpia reproductores que ya terminaron (evita que `active_players`
