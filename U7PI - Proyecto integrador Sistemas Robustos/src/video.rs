@@ -1,0 +1,129 @@
+// ─────────────────────────────────────────────────────────
+// video.rs — Captura de cámara para videollamada (U7PI)
+//
+// Solo se ocupa de CAPTURAR y codificar frames en JPEG; la reproducción
+// del lado receptor reutiliza `player::PlayerHandle::open_stream()` tal
+// cual (sin modificar player.rs) — cada frame recibido por RPC se escribe
+// directo al stdin del reproductor, igual que el streaming de archivos
+// de video del U6.
+// ─────────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops;
+use image::ExtendedColorType;
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::Camera;
+use tokio::sync::mpsc;
+
+const JPEG_QUALITY: u8 = 20;
+const FRAME_INTERVAL: Duration = Duration::from_millis(66); // ~15 fps
+const STREAM_WIDTH: u32 = 640;
+const STREAM_HEIGHT: u32 = 360;
+
+/// Arranca la captura de la cámara por defecto en un hilo dedicado (nokhwa
+/// es bloqueante) y manda cada frame codificado en JPEG por `frame_tx`.
+/// Se detiene cuando `stop` pasa a `true`, el canal se cierra, o la
+/// cámara falla. Retorna de inmediato — los errores de captura se logean
+/// y cortan el hilo, no bloquean al llamador (una videollamada sin cámara
+/// disponible no debe tumbar el resto de la app).
+pub fn start_capture(frame_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>, camera_index: u32) {
+    std::thread::spawn(move || {
+        // Requisito de nokhwa en macOS: pedir permiso de cámara antes de
+        // abrirla. `requestAccessForMediaType` llama al callback de inmediato
+        // si el usuario ya había aceptado/rechazado antes, y recién espera
+        // de verdad si todavía no hay una decisión (diálogo real del SO) —
+        // por eso se espera el callback con un timeout generoso en vez de
+        // asumir un sleep fijo.
+        let (perm_tx, perm_rx) = std::sync::mpsc::channel();
+        nokhwa::nokhwa_initialize(move |granted| {
+            let _ = perm_tx.send(granted);
+        });
+        match perm_rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("[Video] Permiso de cámara denegado por el sistema operativo.");
+                return;
+            }
+            Err(_) => {
+                eprintln!("[Video] El sistema operativo no respondió al pedido de permiso de cámara a tiempo.");
+                return;
+            }
+        }
+        if !nokhwa::nokhwa_check() {
+            eprintln!("[Video] La cámara no está autorizada para esta app (revisar Ajustes del Sistema → Privacidad y Seguridad → Cámara).");
+            return;
+        }
+
+        // Intentar el índice solicitado primero; si falla, probar 0-4 en orden
+        // para auto-detectar la primera cámara disponible sin requerir --camara.
+        let indices: Vec<u32> = std::iter::once(camera_index)
+            .chain((0u32..5).filter(|&i| i != camera_index))
+            .collect();
+
+        let mut camera = None;
+        for idx in indices {
+            let fmt = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+            match Camera::new(CameraIndex::Index(idx), fmt) {
+                Ok(c) => {
+                    if idx != camera_index {
+                        eprintln!("[Video] Cámara {} no disponible; usando índice {}.", camera_index, idx);
+                    }
+                    camera = Some(c);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        let mut camera = match camera {
+            Some(c) => c,
+            None => {
+                eprintln!("[Video] No se encontró ninguna cámara disponible (índices 0-4).");
+                return;
+            }
+        };
+        if let Err(e) = camera.open_stream() {
+            eprintln!("[Video] No se pudo iniciar el stream de la cámara: {}", e);
+            return;
+        }
+
+        while !stop.load(Ordering::Relaxed) {
+            let frame = match camera.frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("[Video] Error capturando frame: {}", e);
+                    break;
+                }
+            };
+            let Ok(decoded) = frame.decode_image::<RgbFormat>() else {
+                continue;
+            };
+
+            // Escalar a resolución de transmisión: reduce 4× los pixels y el
+            // tamaño del frame JPEG, compensando la ineficiencia de JSON para
+            // datos binarios (~4× overhead al serializar Vec<u8> como array).
+            let small = imageops::resize(&decoded, STREAM_WIDTH, STREAM_HEIGHT, imageops::FilterType::Nearest);
+            let packed: Vec<u8> = small.pixels().flat_map(|p| p.0).collect();
+
+            let mut jpeg_buf = Vec::new();
+            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, JPEG_QUALITY);
+            if encoder
+                .encode(&packed, STREAM_WIDTH, STREAM_HEIGHT, ExtendedColorType::Rgb8)
+                .is_err()
+            {
+                continue;
+            }
+
+            if frame_tx.blocking_send(jpeg_buf).is_err() {
+                break; // el consumidor (envío por RPC) se cerró
+            }
+
+            std::thread::sleep(FRAME_INTERVAL);
+        }
+    });
+}
