@@ -1,5 +1,10 @@
 // ─────────────────────────────────────────────────────────
 // audio.rs — Captura y reproducción de audio para videollamada
+//
+// En Linux usa `pw-cat` para captura (PipeWire nativo, necesario cuando
+// ALSA no expone el dispositivo virtual VirtualMic.monitor).
+// En macOS/Windows usa cpal directamente.
+// La reproducción usa cpal en todas las plataformas.
 // ─────────────────────────────────────────────────────────
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -10,13 +15,31 @@ use std::sync::{
     Arc, Mutex,
 };
 
+// ── Tipos públicos ────────────────────────────────────────
+
+enum CaptureInner {
+    Cpal(cpal::Stream),
+    #[cfg(target_os = "linux")]
+    PwCat(std::process::Child),
+}
+
 pub struct AudioCapture {
-    _stream: cpal::Stream,
+    _inner: CaptureInner,
     pub sample_rate: u32,
     pub device_name: String,
 }
 
+// cpal::Stream y Child son Send en las plataformas que usamos
 unsafe impl Send for AudioCapture {}
+
+impl Drop for AudioCapture {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let CaptureInner::PwCat(ref mut child) = self._inner {
+            let _ = child.kill();
+        }
+    }
+}
 
 pub struct AudioPlayback {
     _stream: cpal::Stream,
@@ -25,33 +48,92 @@ pub struct AudioPlayback {
 
 unsafe impl Send for AudioPlayback {}
 
-/// Selecciona el dispositivo de entrada: busca primero uno cuyo nombre
-/// contenga "VirtualMic" (para la Pi con audio_simulator.py), y si no
-/// encuentra ninguno usa el dispositivo por defecto del sistema.
-fn pick_input_device(host: &cpal::Host) -> anyhow::Result<cpal::Device> {
-    if let Ok(mut devs) = host.input_devices() {
-        if let Some(d) = devs.find(|d| {
-            d.name()
-                .map(|n| n.to_lowercase().contains("virtualmic"))
-                .unwrap_or(false)
-        }) {
-            return Ok(d);
+// ── Captura ───────────────────────────────────────────────
+
+/// En Linux: usa `pw-cat --record` para capturar desde el source por defecto
+/// de PipeWire (que debe ser VirtualMic.monitor tras `pactl set-default-source`).
+/// Retorna handle + Receiver de chunks PCM mono i16 a 48 000 Hz.
+#[cfg(target_os = "linux")]
+fn start_capture_pwcat(
+    stop: Arc<AtomicBool>,
+) -> anyhow::Result<(AudioCapture, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    const RATE: u32 = 48_000;
+    const CHUNK_BYTES: usize = RATE as usize / 50 * 2; // 20 ms, mono, s16le
+
+    let mut child = Command::new("pw-cat")
+        .args([
+            "--record",
+            "--format=s16",
+            &format!("--rate={}", RATE),
+            "--channels=1",
+            "-", // stdout
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("pw-cat no encontrado: {}", e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("pw-cat sin stdout"))?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buf = vec![0u8; CHUNK_BYTES];
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let samples: Vec<i16> = buf[..n]
+                        .chunks_exact(2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                        .collect();
+                    let _ = tx.try_send(samples);
+                }
+            }
         }
-    }
-    host.default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de entrada de audio"))
+    });
+
+    Ok((
+        AudioCapture {
+            _inner: CaptureInner::PwCat(child),
+            sample_rate: RATE,
+            device_name: "VirtualMic (pw-cat)".to_string(),
+        },
+        rx,
+    ))
 }
 
-/// Inicia la captura de audio.
-/// Retorna el handle (mantener vivo) + Receiver de chunks PCM mono i16
-/// + nombre del dispositivo seleccionado para mostrarlo en la UI.
-pub fn start_capture(
+/// Captura vía cpal (macOS / Windows, y Linux sin PipeWire).
+fn start_capture_cpal(
     stop: Arc<AtomicBool>,
 ) -> anyhow::Result<(AudioCapture, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
     let host = cpal::default_host();
-    let device = pick_input_device(&host)?;
-    let device_name = device.name().unwrap_or_else(|_| "desconocido".to_string());
 
+    // Busca VirtualMic por nombre, si no usa el device por defecto
+    let device = host
+        .input_devices()
+        .ok()
+        .and_then(|mut d| {
+            d.find(|dev| {
+                dev.name()
+                    .map(|n| n.to_lowercase().contains("virtualmic"))
+                    .unwrap_or(false)
+            })
+        })
+        .or_else(|| host.default_input_device())
+        .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de entrada de audio"))?;
+
+    let device_name = device.name().unwrap_or_else(|_| "desconocido".to_string());
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
@@ -102,20 +184,38 @@ pub fn start_capture(
                 None,
             )?
         }
-        fmt => {
-            return Err(anyhow::anyhow!(
-                "Formato de captura no soportado: {:?}",
-                fmt
-            ))
-        }
+        fmt => return Err(anyhow::anyhow!("Formato de captura no soportado: {:?}", fmt)),
     };
 
     stream.play()?;
-    Ok((AudioCapture { _stream: stream, sample_rate, device_name }, rx))
+    Ok((
+        AudioCapture {
+            _inner: CaptureInner::Cpal(stream),
+            sample_rate,
+            device_name,
+        },
+        rx,
+    ))
 }
 
+/// Punto de entrada público: en Linux prueba pw-cat primero, luego cpal.
+pub fn start_capture(
+    stop: Arc<AtomicBool>,
+) -> anyhow::Result<(AudioCapture, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
+    #[cfg(target_os = "linux")]
+    {
+        match start_capture_pwcat(stop.clone()) {
+            Ok(r) => return Ok(r),
+            Err(e) => eprintln!("[audio] pw-cat falló ({e}), intentando cpal..."),
+        }
+    }
+    start_capture_cpal(stop)
+}
+
+// ── Reproducción ──────────────────────────────────────────
+
 /// Inicia la reproducción en el dispositivo de salida por defecto.
-/// Maneja tanto f32 como i16 según lo que soporte el dispositivo.
+/// Maneja f32 e i16; usa la config nativa para evitar errores de backend.
 pub fn start_playback() -> anyhow::Result<(AudioPlayback, std::sync::mpsc::SyncSender<Vec<i16>>)> {
     let host = cpal::default_host();
     let device = host
@@ -143,41 +243,30 @@ pub fn start_playback() -> anyhow::Result<(AudioPlayback, std::sync::mpsc::SyncS
         }
     });
 
-    let buf_read = buf.clone();
+    let buf_f32 = buf.clone();
+    let buf_i16 = buf.clone();
 
-    // Intenta abrir con f32 (macOS/Windows), luego con i16 (ALSA/Linux)
     let stream = device
         .build_output_stream(
             &config,
-            {
-                let buf = buf_read.clone();
-                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut b = buf.lock().unwrap();
-                    for frame in out.chunks_mut(out_channels) {
-                        let s = b
-                            .pop_front()
-                            .map(|v| v as f32 / i16::MAX as f32)
-                            .unwrap_or(0.0);
-                        for ch in frame.iter_mut() {
-                            *ch = s;
-                        }
-                    }
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let mut b = buf_f32.lock().unwrap();
+                for frame in out.chunks_mut(out_channels) {
+                    let s = b.pop_front().map(|v| v as f32 / i16::MAX as f32).unwrap_or(0.0);
+                    for ch in frame.iter_mut() { *ch = s; }
                 }
             },
             |e| eprintln!("[audio] reproducción: {e}"),
             None,
         )
         .or_else(|_| {
-            // Fallback: i16
             device.build_output_stream(
                 &config,
                 move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    let mut b = buf_read.lock().unwrap();
+                    let mut b = buf_i16.lock().unwrap();
                     for frame in out.chunks_mut(out_channels) {
                         let s = b.pop_front().unwrap_or(0);
-                        for ch in frame.iter_mut() {
-                            *ch = s;
-                        }
+                        for ch in frame.iter_mut() { *ch = s; }
                     }
                 },
                 |e| eprintln!("[audio] reproducción: {e}"),
@@ -189,12 +278,10 @@ pub fn start_playback() -> anyhow::Result<(AudioPlayback, std::sync::mpsc::SyncS
     Ok((AudioPlayback { _stream: stream, device_name }, sync_tx))
 }
 
-/// Lista los dispositivos de entrada disponibles (para diagnóstico).
+/// Lista los dispositivos de entrada disponibles (para diagnóstico en UI).
 pub fn list_input_devices() -> Vec<String> {
     let host = cpal::default_host();
     host.input_devices()
-        .map(|devs| {
-            devs.filter_map(|d| d.name().ok()).collect()
-        })
+        .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default()
 }
