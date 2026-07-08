@@ -179,11 +179,17 @@ pub async fn send_group_message_to(
 pub async fn send_file_to(
     ip: &str, port: u16, from: String, chunks: Vec<FileChunk>,
     progress_tx: Option<mpsc::Sender<ClientEvent>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+
     let client = dial(ip, port).await?;
     let total = chunks.len() as u32;
 
     for (i, chunk) in chunks.into_iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("transferencia cancelada por el receptor"));
+        }
         let rpc_chunk = FileChunkRpc {
             file_name: chunk.file_name,
             chunk_index: chunk.chunk_index,

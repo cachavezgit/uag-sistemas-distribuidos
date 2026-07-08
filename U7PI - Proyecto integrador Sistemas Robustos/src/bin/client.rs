@@ -325,13 +325,17 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
         }
         ClientEvent::FileRejected => {
             if app.pending_file_send.take().is_none() {
-                // pending_file_send ya fue consumido (la transferencia estaba
-                // en curso): el receptor cerró mpv, no rechazó la oferta.
+                // pending_file_send ya fue consumido: la transferencia estaba
+                // en curso. Activar la señal de cancelación para que el task
+                // de envío deje de mandar chunks.
+                if let Some(ref cancel) = app.file_send_cancel {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Some(target) = app.selected_contact.clone() {
                     app.record_message(
                         target,
                         "Sistema".to_string(),
-                        "📹 El receptor cerró el reproductor.".to_string(),
+                        "❌ Transferencia cancelada por el receptor.".to_string(),
                     );
                 }
             }
@@ -692,9 +696,11 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
     }
 
     let total = chunks.len() as u32;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (accept_tx, accept_rx) = tokio::sync::oneshot::channel::<()>();
     app.pending_file_send = Some(accept_tx);
     app.file_transfer_progress = Some((file_name.clone(), 0, total, true));
+    app.file_send_cancel = Some(cancel.clone());
     app.record_message(target.clone(), "Sistema".to_string(), format!("📎 Ofreciendo '{}' a {}...", file_name, target));
 
     tokio::spawn(async move {
@@ -714,7 +720,7 @@ fn start_file_send(app: &mut AppState, path: String, event_tx: mpsc::Sender<Clie
             return;
         }
 
-        let content = match peer::send_file_to(&ip, port, from, chunks, Some(event_tx.clone())).await {
+        let content = match peer::send_file_to(&ip, port, from, chunks, Some(event_tx.clone()), cancel).await {
             Ok(()) => format!("✅ {} enviado", file_name),
             Err(e) => format!("❌ Error enviando {}: {}", file_name, e),
         };
