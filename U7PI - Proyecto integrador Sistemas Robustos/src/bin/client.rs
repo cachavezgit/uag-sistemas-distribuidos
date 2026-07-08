@@ -348,8 +348,12 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
                 let port = node.port;
                 let my_username = app.my_info.username.clone();
                 let stop = app.start_video_call(from);
+                start_audio_capture_and_stream(ip.clone(), port, my_username.clone(), stop.clone(), app);
                 spawn_video_pipeline(ip, port, my_username, stop, app.camera_index);
             }
+        }
+        ClientEvent::AudioChunk { from, sample_rate, data } => {
+            app.receive_audio_chunk(from, sample_rate, data);
         }
     }
 }
@@ -528,12 +532,36 @@ fn accept_video_call(app: &mut AppState, registry: &RegistryServiceClient) {
     let my_username = app.my_info.username.clone();
 
     let stop = app.start_video_call(from.clone());
+    start_audio_capture_and_stream(ip.clone(), port, my_username.clone(), stop.clone(), app);
     spawn_video_pipeline(ip, port, my_username.clone(), stop, app.camera_index);
 
     let registry = registry.clone();
     tokio::spawn(async move {
         let _ = registry.accept_video_call(context::current(), my_username, from).await;
     });
+}
+
+/// Inicia la captura de audio, almacena el handle en la sesión activa y
+/// dispara la tarea de streaming al peer. Sin audio disponible, falla en
+/// silencio (ya se mostró el mensaje de error en `start_video_call`).
+fn start_audio_capture_and_stream(
+    ip: String,
+    port: u16,
+    my_username: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    app: &mut AppState,
+) {
+    let _ = stop; // el Receiver del canal ya cierra el stream al colgar
+    match gato_p2p::audio::start_capture(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))) {
+        Ok((handle, audio_rx)) => {
+            let sample_rate = handle.sample_rate;
+            app.set_audio_capture(handle);
+            tokio::spawn(async move {
+                let _ = peer::stream_audio_to(&ip, port, my_username, sample_rate, audio_rx).await;
+            });
+        }
+        Err(_) => {}
+    }
 }
 
 /// Arranca la captura de cámara (`video::start_capture`, hilo dedicado) y

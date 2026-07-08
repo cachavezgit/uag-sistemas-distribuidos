@@ -62,6 +62,9 @@ pub trait PeerService {
     async fn send_group_message(from: String, group: String, content: String) -> Result<(), String>;
     async fn send_file_chunk(from: String, chunk: FileChunkRpc) -> Result<(), String>;
     async fn send_video_frame(from: String, jpeg_data: Vec<u8>) -> Result<(), String>;
+    /// Chunk de audio PCM mono i16 codificado en base64.
+    /// sample_rate indica la frecuencia de muestreo del emisor.
+    async fn send_audio_chunk(from: String, sample_rate: u32, data: String) -> Result<(), String>;
     async fn game_move(from: String, position: u8) -> Result<(), String>;
     async fn game_invite(from: String) -> Result<(), String>;
     async fn game_accept(from: String) -> Result<(), String>;
