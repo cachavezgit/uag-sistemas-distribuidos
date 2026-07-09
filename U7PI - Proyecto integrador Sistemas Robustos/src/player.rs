@@ -8,10 +8,12 @@
 // ─────────────────────────────────────────────────────────
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 use anyhow::{anyhow, Result};
 
@@ -33,13 +35,14 @@ impl Player {
     /// Prioriza mpv por sus controles IPC; ffplay es fallback funcional sin controles.
     pub fn detect() -> Result<Self> {
         if let Some(path) = find_binary("mpv") {
-            let socket_path = format!(
-                "/tmp/mpv-socket-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
-            );
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            #[cfg(windows)]
+            let socket_path = format!(r"\\.\pipe\mpvsocket_{}", ts);
+            #[cfg(unix)]
+            let socket_path = format!("/tmp/mpv-socket-{}", ts);
             return Ok(Player::MpvIpc(path, socket_path));
         }
         if let Some(path) = find_binary("ffplay") {
@@ -47,8 +50,9 @@ impl Player {
         }
         Err(anyhow!(
             "No se encontró mpv ni ffplay. Instala con:\n\
-             - macOS: brew install mpv\n\
-             - Linux: sudo apt install mpv -y"
+             - macOS:   brew install mpv\n\
+             - Linux:   sudo apt install mpv -y\n\
+             - Windows: winget install mpv  (o descargar desde mpv.io)"
         ))
     }
 
@@ -76,6 +80,9 @@ fn find_binary(name: &str) -> Option<String> {
         }
     }
 
+    #[cfg(windows)]
+    let output = Command::new("where").arg(name).output().ok()?;
+    #[cfg(unix)]
     let output = Command::new("which").arg(name).output().ok()?;
     if !output.status.success() {
         return None;
@@ -269,14 +276,29 @@ impl PlaybackCommand {
 }
 
 /// Conecta al socket IPC de mpv y envía un comando JSON.
-/// Reintenta hasta 10 veces con 50 ms de pausa, ya que el socket puede no
-/// existir inmediatamente después de que mpv arranca.
+/// Reintenta hasta 10 veces con 50 ms de pausa, ya que el socket/pipe puede
+/// no existir inmediatamente después de que mpv arranca.
 pub fn try_send_ipc(socket_path: &str, json_cmd: &str) -> Result<()> {
-    let mut last_err = None;
+    let payload = format!("{}\n", json_cmd);
+    let mut last_err: Option<std::io::Error> = None;
+
     for _ in 0..10 {
+        #[cfg(unix)]
         match UnixStream::connect(socket_path) {
             Ok(mut stream) => {
-                stream.write_all(format!("{}\n", json_cmd).as_bytes())?;
+                stream.write_all(payload.as_bytes())?;
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        #[cfg(windows)]
+        match std::fs::OpenOptions::new().write(true).open(socket_path) {
+            Ok(mut pipe) => {
+                pipe.write_all(payload.as_bytes())?;
                 return Ok(());
             }
             Err(e) => {
@@ -285,6 +307,7 @@ pub fn try_send_ipc(socket_path: &str, json_cmd: &str) -> Result<()> {
             }
         }
     }
+
     Err(anyhow!(
         "No se pudo conectar al socket IPC de mpv: {:?}",
         last_err
