@@ -49,6 +49,8 @@ pub enum ClientEvent {
     FileAccepted,
     FileRejected,
     FileProgress { current: u32, total: u32 },
+    /// Chunk de audio PCM mono i16 recibido durante una videollamada.
+    AudioChunk { from: String, sample_rate: u32, data: Vec<i16> },
 }
 
 pub struct AppState {
@@ -129,6 +131,14 @@ pub struct GameState {
 pub struct VideoSession {
     pub peer: String,
     pub frame_tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    /// Canal para enviar chunks de audio al hilo de reproducción.
+    pub audio_playback_tx: Option<std::sync::mpsc::SyncSender<Vec<i16>>>,
+    /// Handle del stream de reproducción de audio (mantener vivo).
+    pub audio_playback: Option<gato_p2p::audio::AudioPlayback>,
+    /// Handle del stream de captura de audio (mantener vivo).
+    pub audio_capture: Option<gato_p2p::audio::AudioCapture>,
+    /// true si start_playback falló: evita reintentar en cada chunk entrante.
+    pub audio_playback_init_failed: bool,
     /// Compartido con el hilo de captura (`video::start_capture`); ponerlo
     /// en `true` le pide que se detenga al colgar.
     pub stop_capture: Arc<AtomicBool>,
@@ -614,8 +624,24 @@ impl AppState {
             }
         };
 
-        self.video_session = Some(VideoSession { peer, frame_tx, stop_capture: stop.clone() });
+        self.video_session = Some(VideoSession {
+            peer,
+            frame_tx,
+            audio_playback_tx: None,
+            audio_playback: None,
+            audio_capture: None,  // se asigna desde client.rs tras start_capture
+            audio_playback_init_failed: false,
+            stop_capture: stop.clone(),
+        });
         stop
+    }
+
+    /// Almacena el handle de captura de audio en la sesión activa.
+    /// Llamado desde client.rs después de arrancar start_capture exitosamente.
+    pub fn set_audio_capture(&mut self, handle: gato_p2p::audio::AudioCapture) {
+        if let Some(session) = self.video_session.as_mut() {
+            session.audio_capture = Some(handle);
+        }
     }
 
     /// Reenvía un frame JPEG recibido al hilo escritor que alimenta mpv.
@@ -628,6 +654,46 @@ impl AppState {
         }
         if let Some(tx) = self.video_session.as_ref().and_then(|s| s.frame_tx.as_ref()) {
             let _ = tx.try_send(jpeg);
+        }
+    }
+
+    /// Recibe un chunk de audio durante una videollamada activa.
+    /// En el primer chunk inicializa el stream de reproducción; los siguientes
+    /// se envían al hilo de reproducción sin overhead adicional.
+    /// Si la inicialización falla, registra el error UNA vez y no reintenta.
+    pub fn receive_audio_chunk(&mut self, from: String, sample_rate: u32, data: Vec<i16>) {
+        let matches = self.video_session.as_ref().map(|s| s.peer == from).unwrap_or(false);
+        if !matches {
+            return;
+        }
+        // Si ya falló la inicialización, descartar silenciosamente
+        if self.video_session.as_ref().map(|s| s.audio_playback_init_failed).unwrap_or(false) {
+            return;
+        }
+        // Lazy-init del playback al primer chunk
+        if self.video_session.as_ref().and_then(|s| s.audio_playback_tx.as_ref()).is_none() {
+            match gato_p2p::audio::start_playback() {
+                Ok((playback_handle, tx)) => {
+                    let dev = playback_handle.device_name.clone();
+                    if let Some(session) = self.video_session.as_mut() {
+                        session.audio_playback = Some(playback_handle);
+                        session.audio_playback_tx = Some(tx);
+                    }
+                    self.record_message(from.clone(), "Sistema".to_string(),
+                        format!("🔊 Audio reproduciendo en: {}", dev));
+                }
+                Err(e) => {
+                    if let Some(session) = self.video_session.as_mut() {
+                        session.audio_playback_init_failed = true;
+                    }
+                    self.record_message(from, "Sistema".to_string(),
+                        format!("⚠️ Audio de salida no disponible: {}", e));
+                    return;
+                }
+            }
+        }
+        if let Some(tx) = self.video_session.as_ref().and_then(|s| s.audio_playback_tx.as_ref()) {
+            let _ = tx.try_send(data);
         }
     }
 

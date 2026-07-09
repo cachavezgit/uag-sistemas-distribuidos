@@ -65,6 +65,16 @@ impl PeerService for PeerServer {
         self.emit(ClientEvent::VideoFrame { from, jpeg: jpeg_data }).await
     }
 
+    async fn send_audio_chunk(self, _: context::Context, from: String, sample_rate: u32, data: String) -> Result<(), String> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&data).unwrap_or_default();
+        let samples: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        self.emit(ClientEvent::AudioChunk { from, sample_rate, data: samples }).await
+    }
+
     async fn game_move(self, _: context::Context, from: String, position: u8) -> Result<(), String> {
         self.emit(ClientEvent::GameMove { from, position }).await
     }
@@ -206,6 +216,25 @@ pub async fn send_file_to(
         }
     }
 
+    Ok(())
+}
+
+/// Consume chunks de audio PCM mono i16 y los transmite al peer sobre una
+/// conexión tarpc persistente. Termina cuando el canal se cierra (al colgar).
+pub async fn stream_audio_to(
+    ip: &str,
+    port: u16,
+    from: String,
+    sample_rate: u32,
+    mut audio_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
+) -> anyhow::Result<()> {
+    use base64::Engine;
+    let client = dial(ip, port).await?;
+    while let Some(samples) = audio_rx.recv().await {
+        let bytes: Vec<u8> = samples.iter().flat_map(|&s| s.to_le_bytes()).collect();
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let _ = client.send_audio_chunk(context::current(), from.clone(), sample_rate, data).await;
+    }
     Ok(())
 }
 

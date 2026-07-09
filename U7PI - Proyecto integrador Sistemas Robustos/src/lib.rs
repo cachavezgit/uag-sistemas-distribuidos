@@ -4,6 +4,7 @@
 // Los binarios server/client comparten esta librería.
 // ─────────────────────────────────────────────────────────
 
+pub mod audio;
 pub mod auth;
 pub mod crypto;
 pub mod emoji;

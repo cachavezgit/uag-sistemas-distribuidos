@@ -33,6 +33,7 @@ anyhow = "1.0"
 base64 = "0.22"
 ratatui-explorer = "0.2"
 rpassword = "7"
+cpal = "0.15"
 
 # Videollamada: captura de cámara + codificación de frames.
 # Opcional: en sistemas sin libclang (p.ej. Raspberry Pi sin dev tools)
