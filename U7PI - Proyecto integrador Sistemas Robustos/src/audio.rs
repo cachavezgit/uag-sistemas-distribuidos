@@ -84,21 +84,24 @@ fn start_capture_pwcat(
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
 
     std::thread::spawn(move || {
+        use std::io::Read;
         let mut reader = std::io::BufReader::new(stdout);
         let mut buf = vec![0u8; CHUNK_BYTES];
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let samples: Vec<i16> = buf[..n]
+            // read_exact garantiza chunks de exactamente 20 ms (960 muestras)
+            // evitando cientos de RPC por segundo con chunks diminutos
+            match reader.read_exact(&mut buf) {
+                Ok(()) => {
+                    let samples: Vec<i16> = buf
                         .chunks_exact(2)
                         .map(|b| i16::from_le_bytes([b[0], b[1]]))
                         .collect();
                     let _ = tx.try_send(samples);
                 }
+                Err(_) => break,
             }
         }
     });
@@ -140,24 +143,28 @@ fn start_capture_cpal(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
 
+    // Número de muestras mono para 20 ms al sample_rate del dispositivo
+    let chunk_samples = (sample_rate / 50) as usize;
+    let buf_cpal: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::with_capacity(chunk_samples * 2)));
+
     let stream = match config.sample_format() {
         SampleFormat::F32 => {
             let tx2 = tx.clone();
             let stop2 = stop.clone();
+            let buf2 = buf_cpal.clone();
             device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if stop2.load(Ordering::Relaxed) {
-                        return;
+                    if stop2.load(Ordering::Relaxed) { return; }
+                    let mut b = buf2.lock().unwrap();
+                    for frame in data.chunks(channels) {
+                        let avg = frame.iter().sum::<f32>() / channels as f32;
+                        b.push((avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
                     }
-                    let mono: Vec<i16> = data
-                        .chunks(channels)
-                        .map(|frame| {
-                            let avg = frame.iter().sum::<f32>() / channels as f32;
-                            (avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-                        })
-                        .collect();
-                    let _ = tx2.try_send(mono);
+                    if b.len() >= chunk_samples {
+                        let chunk = b.drain(..chunk_samples).collect();
+                        let _ = tx2.try_send(chunk);
+                    }
                 },
                 |e| eprintln!("[audio] captura: {e}"),
                 None,
@@ -165,20 +172,20 @@ fn start_capture_cpal(
         }
         SampleFormat::I16 => {
             let stop2 = stop.clone();
+            let buf2 = buf_cpal.clone();
             device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    if stop2.load(Ordering::Relaxed) {
-                        return;
+                    if stop2.load(Ordering::Relaxed) { return; }
+                    let mut b = buf2.lock().unwrap();
+                    for frame in data.chunks(channels) {
+                        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                        b.push((sum / channels as i32) as i16);
                     }
-                    let mono: Vec<i16> = data
-                        .chunks(channels)
-                        .map(|frame| {
-                            let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-                            (sum / channels as i32) as i16
-                        })
-                        .collect();
-                    let _ = tx.try_send(mono);
+                    if b.len() >= chunk_samples {
+                        let chunk = b.drain(..chunk_samples).collect();
+                        let _ = tx.try_send(chunk);
+                    }
                 },
                 |e| eprintln!("[audio] captura: {e}"),
                 None,
