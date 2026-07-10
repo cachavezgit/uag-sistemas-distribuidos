@@ -55,7 +55,7 @@ impl Player {
             "No se encontró mpv ni ffplay. Instala con:\n\
              - macOS:   brew install mpv\n\
              - Linux:   sudo apt install mpv -y\n\
-             - Windows: winget install shinchiro.mpv"
+             - Windows: winget install mpv  (o descargar desde mpv.io)"
         ))
     }
 
