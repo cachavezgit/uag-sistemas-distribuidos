@@ -533,10 +533,154 @@ cargo test playback_command_genera_json_valido -- --nocapture
 
 ---
 
+---
+
+### U7PI — Chat P2P Multi-Usuario Estilo WhatsApp con Videollamada y Audio (Rust)
+
+Proyecto integrador que extiende todo lo aprendido en las unidades anteriores a un sistema de comunicación completo con servidor de descubrimiento, TUI estilo WhatsApp, grupos, transferencia de archivos cifrada, videollamada bidireccional con audio en tiempo real y soporte multiplataforma (macOS, Linux/Raspberry Pi, Windows).
+
+**Ubicación:** `U7PI - Proyecto integrador Sistemas Robustos/`
+
+#### Arquitectura
+
+Dos binarios independientes que se comunican vía **tarpc** (RPC sobre TCP con serialización JSON):
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Servidor (server)                  │
+│  RegistryService: register / unregister / groups /  │
+│  request_video_call / accept_video_call             │
+│  Push inverso: notify_* → PeerService de cada nodo  │
+└───────────────────┬─────────────────────────────────┘
+                    │ TCP (tarpc)
+        ┌───────────┼───────────┐
+        │           │           │
+   ┌────▼────┐ ┌────▼────┐ ┌───▼─────┐
+   │ Cliente │ │ Cliente │ │ Cliente │  (Mac / Pi / Windows)
+   │  Ivan   │ │ Carlos  │ │  Sofia  │
+   └────┬────┘ └────┬────┘ └───┬─────┘
+        └───────────┴───────────┘
+              TCP directo P2P
+         (mensajes, archivos, video, audio)
+```
+
+Cada cliente levanta su propio servidor `PeerService` que recibe tanto llamadas P2P directas de otros clientes como el push de vuelta del servidor de descubrimiento (sin canal broadcast: el push es RPC directo).
+
+#### Funcionalidades
+
+| Feature | Descripción |
+|---|---|
+| **Chat individual** | Mensajes directos P2P en tiempo real |
+| **Grupos** | Creación de grupos y mensajes a múltiples peers |
+| **Transferencia de archivos** | Fragmentación, cifrado Vigenère + Base64, progreso en TUI |
+| **Streaming de video (archivo)** | Reproducción inmediata desde el primer chunk via mpv/ffplay |
+| **Videollamada** | Captura JPEG con nokhwa, transmisión MJPEG en tiempo real |
+| **Audio en videollamada** | PCM mono i16 a 48 kHz, 50 chunks/segundo por RPC |
+| **Juego del gato** | Embebido en el chat, 2 jugadores, `/gato` + `[A]` para aceptar |
+| **Emojis** | Sustitución con `/e <signo>` en cualquier posición del mensaje |
+| **Autenticación** | Contraseña enmascarada contra `usuarios.json`, lock de sesión |
+| **Cifrado** | Vigenère con clave compartida `SISTEMAS` en transferencia de archivos |
+
+#### Módulos principales
+
+| Archivo | Descripción |
+|---|---|
+| `src/proto.rs` | Traits RPC: `RegistryService` (servidor) y `PeerService` (cada cliente) |
+| `src/bin/server.rs` | Servidor de descubrimiento; push inverso de directorio/grupos/videollamada |
+| `src/bin/client.rs` | Loop principal de la TUI; manejo de eventos y teclado |
+| `src/bin/client/app.rs` | Estado de la aplicación: `AppState`, `VideoSession`, eventos |
+| `src/bin/client/peer.rs` | `PeerService` del cliente; funciones de streaming P2P |
+| `src/bin/client/ui.rs` | Layout TUI (ratatui): contactos, chat, overlays |
+| `src/audio.rs` | Captura (`cpal`/`pw-cat`) y reproducción (`cpal`) de audio |
+| `src/video.rs` | Captura de cámara con nokhwa, codificación JPEG por frame |
+| `src/player.rs` | Detección y control de mpv/ffplay; IPC para pausa/seek |
+| `src/auth.rs` | Autenticación y lock de sesión |
+| `src/crypto.rs` | Cifrado/descifrado Vigenère |
+| `src/transfer.rs` | Fragmentación y reconstrucción de archivos |
+| `src/game.rs` | Lógica del juego del gato |
+| `src/emoji.rs` | Sustitución de patrones `/e <signo>` |
+
+#### Pipeline de audio
+
+```
+Linux (Pi):   pw-cat --record → read_exact 20ms → base64 → send_audio_chunk RPC
+macOS/Win:    cpal input_stream → buffer 20ms → base64 → send_audio_chunk RPC
+Receptor:     decode base64 → Vec<i16> → cpal output_stream (lazy init en 1er chunk)
+```
+
+`read_exact` garantiza chunks de exactamente 20 ms (960 muestras a 48 kHz, 50 RPC/s). Sin esto, `read()` devuelve 256–512 bytes generando 200–400 RPC/s que saturan el canal y congelan el video.
+
+#### Cómo ejecutar
+
+```bash
+cd "U7PI - Proyecto integrador Sistemas Robustos"
+
+# Terminal 1 — Servidor de descubrimiento
+cargo run --bin server
+
+# Terminal 2 — Cliente Mac/Linux (con cámara)
+cargo run --features camera --bin client -- \
+    --nombre Ivan --emoji "🦀" --servidor 192.168.132.10:9000
+
+# Terminal 3 — Cliente Raspberry Pi (sin cámara, solo recibe video)
+cargo run --bin client -- \
+    --nombre Carlos --emoji "🐙" --servidor 192.168.132.10:9000
+
+# PowerShell Windows (con cámara)
+cargo run --features camera --bin client -- `
+    --nombre Adan --emoji "🐺" --servidor 192.168.132.10:9000
+```
+
+Usar un usuario distinto de `usuarios.json` por cada terminal. Borrar locks huérfanos si un proceso se corta abruptamente:
+```bash
+rm -f sesiones/*.lock
+```
+
+#### Controles
+
+| Tecla | Contexto | Acción |
+|---|---|---|
+| `↑` / `↓` | Contactos | Navegar entre contactos y grupos |
+| `Tab` | Global | Cambiar foco entre Contactos e Input |
+| `Enter` | Input | Enviar mensaje |
+| `F2` | Global | Abrir explorador de archivos para enviar |
+| `F4` | Contactos | Iniciar videollamada con el contacto seleccionado |
+| `A` | Contactos | Aceptar videollamada o invitación al gato entrante |
+| `Esc` | En llamada | Colgar la videollamada |
+| `G` | Contactos | Crear nuevo grupo |
+| `/gato` | Input | Invitar al contacto seleccionado a una partida |
+| `1`–`9` | En partida | Jugar casilla del tablero |
+| `Esc` | En partida | Abandonar la partida |
+| `Espacio` / `←` / `→` | Archivo de video | Pausar / retroceder / avanzar (solo mpv) |
+| `Ctrl+C` | Global | Salir de la aplicación |
+| `Q` | Foco Contactos | Salir de la aplicación |
+
+#### Tests
+
+```bash
+cargo test --lib          # 24 tests de librería (crypto, transfer, game, emoji, player)
+cargo test --bin client   # 11 tests de estado TUI (video, grupos, gato)
+```
+
+#### Soporte multiplataforma
+
+| Plataforma | Video envío | Video recepción | Audio |
+|---|---|---|---|
+| macOS | ✅ nokhwa | ✅ mpv | ✅ cpal (CoreAudio) |
+| Linux / Raspberry Pi | ✅ nokhwa (`--features camera`) | ✅ mpv/ffplay | ✅ pw-cat (PipeWire) |
+| Windows | ✅ nokhwa | ✅ ffplay (WinGet) | ✅ cpal (WASAPI) |
+
+En Windows, si mpv/ffplay no están en PATH, la app los busca automáticamente en `%LOCALAPPDATA%\Microsoft\WinGet\Packages\`.
+
+---
+
 ## Requisitos
 
 - Python 3.x (sin dependencias externas, solo biblioteca estándar)
 - Rust + Cargo (para las actividades U2A1 en adelante)
-- `mpv` (recomendado) o `ffplay` para reproducción de video en U6A1
+- `mpv` (recomendado) o `ffplay` para reproducción de video en U6A1 y U7PI
   - macOS: `brew install mpv`
   - Linux: `sudo apt install mpv -y`
+  - Windows: `winget install Gyan.FFmpeg` (incluye ffplay)
+- `pw-cat` para captura de audio en Linux con PipeWire (incluido en `pipewire-utils`)
+- `libclang` para compilar con `--features camera` en Linux: `sudo apt install libclang-dev`
