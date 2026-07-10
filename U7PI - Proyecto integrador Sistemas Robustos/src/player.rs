@@ -186,10 +186,13 @@ impl PlayerHandle {
             Player::Ffplay(bin) => Command::new(bin)
                 .args([
                     "-f", "mjpeg",
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
                     "-probesize", "32",
                     "-analyzeduration", "0",
-                    "-flags", "low_delay",
+                    "-sync", "ext",
                     "-framedrop",
+                    "-vf", "setpts=0",
                     "-loglevel", "quiet",
                     "-i", "pipe:0",
                 ])
