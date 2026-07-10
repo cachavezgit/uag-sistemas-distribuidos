@@ -123,7 +123,10 @@ fn start_capture_cpal(
 ) -> anyhow::Result<(AudioCapture, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
     let host = cpal::default_host();
 
-    // Busca VirtualMic por nombre, si no usa el device por defecto
+    // 1. Busca VirtualMic por nombre (Pi/Linux)
+    // 2. Si no, usa el dispositivo por defecto del sistema
+    // 3. Si tampoco hay default (Windows: Realtek como "Communications Device"),
+    //    toma el primer dispositivo disponible en el host
     let device = host
         .input_devices()
         .ok()
@@ -135,6 +138,7 @@ fn start_capture_cpal(
             })
         })
         .or_else(|| host.default_input_device())
+        .or_else(|| host.input_devices().ok()?.next())
         .ok_or_else(|| anyhow::anyhow!("Sin dispositivo de entrada de audio"))?;
 
     let device_name = device.name().unwrap_or_else(|_| "desconocido".to_string());
