@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui_explorer::FileExplorer;
 
@@ -710,12 +709,7 @@ impl AppState {
 }
 
 pub fn timestamp_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let secs_of_day = secs % 86400;
-    format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+    chrono::Local::now().format("%H:%M").to_string()
 }
 
 #[cfg(test)]

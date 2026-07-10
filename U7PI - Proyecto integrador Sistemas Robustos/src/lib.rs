@@ -20,13 +20,7 @@ pub mod video;
 /// distinta por cada par de peers como hacía el flag `--clave` del U6.
 pub const CLAVE_VIGENERE: &str = "SISTEMAS";
 
-/// Hora en formato `HH:MM:SS` (UTC, sin ajuste de zona horaria), para
-/// prefijar logs (`server.rs`).
+/// Hora local en formato `HH:MM:SS`, para prefijar logs (`server.rs`).
 pub fn timestamp_log() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let secs_of_day = secs % 86400;
-    format!("{:02}:{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60)
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
