@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui_explorer::FileExplorer;
 
@@ -661,7 +660,7 @@ impl AppState {
     /// En el primer chunk inicializa el stream de reproducción; los siguientes
     /// se envían al hilo de reproducción sin overhead adicional.
     /// Si la inicialización falla, registra el error UNA vez y no reintenta.
-    pub fn receive_audio_chunk(&mut self, from: String, sample_rate: u32, data: Vec<i16>) {
+    pub fn receive_audio_chunk(&mut self, from: String, _sample_rate: u32, data: Vec<i16>) {
         let matches = self.video_session.as_ref().map(|s| s.peer == from).unwrap_or(false);
         if !matches {
             return;
@@ -710,12 +709,7 @@ impl AppState {
 }
 
 pub fn timestamp_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let secs_of_day = secs % 86400;
-    format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+    chrono::Local::now().format("%H:%M").to_string()
 }
 
 #[cfg(test)]

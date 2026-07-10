@@ -93,16 +93,24 @@ fn parse_args() -> Args {
 /// reproducción de video autoplay caen a `ffplay` si existe (ver
 /// `player::Player::detect`), o simplemente fallarán con un mensaje claro.
 fn advertir_si_falta_mpv() {
-    let tiene_mpv = std::process::Command::new("which")
+    #[cfg(windows)]
+    let cmd = "where";
+    #[cfg(not(windows))]
+    let cmd = "which";
+
+    let tiene_mpv = std::process::Command::new(cmd)
         .arg("mpv")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     if !tiene_mpv {
-        eprintln!("[Aviso] No se encontró 'mpv' en el sistema (probá `which mpv`).");
+        eprintln!("[Aviso] No se encontró 'mpv' en el sistema (ejecutá `{} mpv`).", cmd);
         eprintln!("        La videollamada y la reproducción de video usarán 'ffplay' si está disponible.");
-        eprintln!("        Instalar con: brew install mpv (macOS) / sudo apt install mpv (Linux)\n");
+        eprintln!("        Instalar con:");
+        eprintln!("          macOS:   brew install mpv");
+        eprintln!("          Linux:   sudo apt install mpv -y");
+        eprintln!("          Windows: winget install mpv  (luego reiniciar la terminal)\n");
     }
 }
 
@@ -348,8 +356,8 @@ fn handle_client_event(app: &mut AppState, event: ClientEvent) {
                 let port = node.port;
                 let my_username = app.my_info.username.clone();
                 let stop = app.start_video_call(from);
-                start_audio_capture_and_stream(ip.clone(), port, my_username.clone(), stop.clone(), app);
-                spawn_video_pipeline(ip, port, my_username, stop, app.camera_index);
+                spawn_video_pipeline(ip.clone(), port, my_username.clone(), stop.clone(), app.camera_index);
+                start_audio_capture_and_stream(ip, port, my_username, stop, app);
             }
         }
         ClientEvent::AudioChunk { from, sample_rate, data } => {
@@ -532,8 +540,8 @@ fn accept_video_call(app: &mut AppState, registry: &RegistryServiceClient) {
     let my_username = app.my_info.username.clone();
 
     let stop = app.start_video_call(from.clone());
-    start_audio_capture_and_stream(ip.clone(), port, my_username.clone(), stop.clone(), app);
-    spawn_video_pipeline(ip, port, my_username.clone(), stop, app.camera_index);
+    spawn_video_pipeline(ip.clone(), port, my_username.clone(), stop.clone(), app.camera_index);
+    start_audio_capture_and_stream(ip, port, my_username.clone(), stop, app);
 
     let registry = registry.clone();
     tokio::spawn(async move {
