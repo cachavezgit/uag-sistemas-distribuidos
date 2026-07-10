@@ -74,7 +74,8 @@ impl Player {
 }
 
 /// Busca `name` en rutas hardcodeadas conocidas y, si no aparece,
-/// recurre a `which` como fallback.
+/// recurre a `which`/`where` como fallback. En Windows también busca
+/// en el directorio de paquetes de WinGet (no agrega al PATH automáticamente).
 fn find_binary(name: &str) -> Option<String> {
     for dir in KNOWN_DIRS {
         let candidate = format!("{}/{}", dir, name);
@@ -87,15 +88,34 @@ fn find_binary(name: &str) -> Option<String> {
     let output = Command::new("where").arg(name).output().ok()?;
     #[cfg(unix)]
     let output = Command::new("which").arg(name).output().ok()?;
-    if !output.status.success() {
-        return None;
+    if output.status.success() {
+        let path = String::from_utf8(output.stdout)
+            .ok()?
+            .lines()
+            .next()?
+            .trim()
+            .to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
     }
-    let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
+
+    // En Windows, winget instala en %LOCALAPPDATA%\Microsoft\WinGet\Packages\
+    // y no siempre agrega el binario al PATH del sistema.
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let winget_root = format!("{}\\Microsoft\\WinGet\\Packages", local);
+        if let Ok(entries) = std::fs::read_dir(&winget_root) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(format!("{}.exe", name));
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
     }
+
+    None
 }
 
 // ─────────────────────────────────────────────────────────

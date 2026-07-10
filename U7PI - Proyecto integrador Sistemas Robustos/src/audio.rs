@@ -18,6 +18,7 @@ use std::sync::{
 // ── Tipos públicos ────────────────────────────────────────
 
 enum CaptureInner {
+    #[allow(dead_code)]
     Cpal(cpal::Stream),
     #[cfg(target_os = "linux")]
     PwCat(std::process::Child),

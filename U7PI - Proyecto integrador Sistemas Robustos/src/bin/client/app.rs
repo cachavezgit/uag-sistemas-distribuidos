@@ -661,7 +661,7 @@ impl AppState {
     /// En el primer chunk inicializa el stream de reproducción; los siguientes
     /// se envían al hilo de reproducción sin overhead adicional.
     /// Si la inicialización falla, registra el error UNA vez y no reintenta.
-    pub fn receive_audio_chunk(&mut self, from: String, sample_rate: u32, data: Vec<i16>) {
+    pub fn receive_audio_chunk(&mut self, from: String, _sample_rate: u32, data: Vec<i16>) {
         let matches = self.video_session.as_ref().map(|s| s.peer == from).unwrap_or(false);
         if !matches {
             return;
